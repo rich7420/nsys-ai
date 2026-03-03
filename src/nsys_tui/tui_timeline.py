@@ -1215,7 +1215,7 @@ class TimelineTUI:
             try:
                 tui_actions.execute_tui_action(action, self)
             except Exception:
-                continue
+                pass
 
         try:
             curses.ungetch(0)

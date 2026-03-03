@@ -393,14 +393,14 @@ def chat_completion(body_bytes: bytes) -> dict | None:
     Handle POST /api/chat body. Returns { "content": str, "actions": list } or None for 501.
     """
     try:
-        import litellm
-    except ImportError:
-        return None
-
-    try:
         payload = json.loads(body_bytes.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return {"content": "Invalid request body.", "actions": []}
+
+    try:
+        import litellm
+    except ImportError:
+        return None
 
     preferred_model = payload.get("model")
     model, _ = _get_model_and_key(preferred_model)
