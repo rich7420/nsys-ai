@@ -455,7 +455,7 @@ def _build_parser():
 
     # ── timeline-web ──
     p = sub.add_parser("timeline-web", help="Horizontal timeline in browser")
-    _add_gpu_trim(p, gpu_required=False)
+    _add_gpu_trim(p, gpu_required=False, trim_required=False)
     p.add_argument("--port", type=int, default=8144, help="HTTP port (default: 8144)")
     p.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
     p.set_defaults(handler=_cmd_timeline_web)

@@ -54,37 +54,74 @@ def write_html(prof, device: int, trim: tuple[int, int], path: str):
         f.write(generate_html(prof, device, trim))
 
 
-def generate_timeline_html(prof, device, trim: tuple[int, int]) -> str:
-    """Generate a standalone HTML page with the horizontal timeline viewer.
+def generate_timeline_data_json(prof, devices, trim: tuple[int, int]) -> str:
+    """Return JSON string of per-GPU kernel/NVTX data for a time window.
 
-    *device* may be a single int or a list of ints.  When a list is provided
-    the template receives a ``$DATA`` structure of
-    ``{"gpus": [{"id": N, "data": [...]}, ...]}``.
+    Called by the ``/api/data`` endpoint for on-demand tile loading.
     """
     from typing import Sequence
-    devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
+    if not isinstance(devices, Sequence):
+        devices = [devices]
 
     gpu_entries = []
-    gpu_labels = []
     for dev in devices:
         roots = build_nvtx_tree(prof, dev, trim)
         tree_json = to_json(roots)
         gpu_entries.append({"id": dev, "data": tree_json})
-        gpu_info = prof.meta.gpu_info.get(dev)
-        label = f"GPU {dev}"
-        if gpu_info:
-            label += (f" - {gpu_info.name} ({gpu_info.pci_bus}), "
-                      f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes/1e9:.0f}GB")
-        gpu_labels.append(label)
 
-    data_json = json.dumps({"gpus": gpu_entries})
-    gpu_label = " | ".join(gpu_labels) if len(gpu_labels) > 1 else gpu_labels[0]
+    return json.dumps({"gpus": gpu_entries})
+
+
+def generate_timeline_html(prof, device, trim: tuple[int, int] | None = None) -> str:
+    """Generate a standalone HTML page with the horizontal timeline viewer.
+
+    *device* may be a single int or a list of ints.
+    When *trim* is None, HTML is generated in progressive mode: ``$DATA``
+    is ``null`` and the template fetches data via ``/api/data`` on demand.
+    """
+    from typing import Sequence
+    devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
+
+    if trim is not None:
+        # Full data baked into HTML
+        gpu_entries = []
+        gpu_labels = []
+        for dev in devices:
+            roots = build_nvtx_tree(prof, dev, trim)
+            tree_json = to_json(roots)
+            gpu_entries.append({"id": dev, "data": tree_json})
+            gpu_info = prof.meta.gpu_info.get(dev)
+            label = f"GPU {dev}"
+            if gpu_info:
+                label += (f" - {gpu_info.name} ({gpu_info.pci_bus}), "
+                          f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes/1e9:.0f}GB")
+            gpu_labels.append(label)
+
+        data_json = json.dumps({"gpus": gpu_entries})
+        gpu_label = " | ".join(gpu_labels) if len(gpu_labels) > 1 else gpu_labels[0]
+        trim_label = f"{trim[0]/1e9:.1f}s - {trim[1]/1e9:.1f}s"
+        progressive = ""
+    else:
+        # Progressive mode: no data baked in
+        data_json = "null"
+        gpu_labels = []
+        for dev in devices:
+            gpu_info = prof.meta.gpu_info.get(dev)
+            label = f"GPU {dev}"
+            if gpu_info:
+                label += (f" - {gpu_info.name} ({gpu_info.pci_bus}), "
+                          f"{gpu_info.sm_count} SMs, {gpu_info.memory_bytes/1e9:.0f}GB")
+            gpu_labels.append(label)
+        gpu_label = " | ".join(gpu_labels) if len(gpu_labels) > 1 else gpu_labels[0]
+        trim_label = "Progressive"
+        progressive = "1"
 
     tmpl = _load_template("timeline.html")
     return tmpl.safe_substitute(
         DATA=data_json,
         GPU_LABEL=gpu_label,
-        TRIM_LABEL=f"{trim[0]/1e9:.1f}s - {trim[1]/1e9:.1f}s",
+        TRIM_LABEL=trim_label,
+        PROGRESSIVE=progressive,
     )
 
 

@@ -118,8 +118,12 @@ def _handle_chat_stream(body_bytes: bytes):
 
 
 class _ViewerHandler(BaseHTTPRequestHandler):
-    """Serve the pre-rendered HTML on GET; GET /api/models for model list; POST /api/chat for AI chat."""
+    """Serve the pre-rendered HTML on GET; GET /api/models for model list;
+    GET /api/data for on-demand tile data; GET /api/meta for profile metadata;
+    POST /api/chat for AI chat."""
     html_bytes: bytes = b""
+    prof = None           # set by serve_timeline
+    devices: list = []    # set by serve_timeline
 
     def do_GET(self):
         path = self.path.split("?")[0]
@@ -131,18 +135,81 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             except Exception:
                 options = []
                 default = None
-            body = json.dumps({"default": default, "options": options}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._json_response({"default": default, "options": options})
+            return
+        if path == "/api/meta":
+            self._handle_meta()
+            return
+        if path == "/api/data":
+            self._handle_data()
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(self.html_bytes)))
         self.end_headers()
         self.wfile.write(self.html_bytes)
+
+    def _handle_meta(self):
+        """Return profile metadata: time range, GPU list, device count."""
+        prof = self.__class__.prof
+        devices = self.__class__.devices
+        if not prof:
+            self._json_response({"error": "no profile"}, 500)
+            return
+        gpu_infos = []
+        for dev in devices:
+            info = prof.meta.gpu_info.get(dev)
+            label = f"GPU {dev}"
+            if info:
+                label += f" - {info.name} ({info.pci_bus}), {info.sm_count} SMs, {info.memory_bytes/1e9:.0f}GB"
+            gpu_infos.append({"id": dev, "label": label})
+        # Get profile time range from metadata
+        t_start = getattr(prof.meta, 'session_start_ns', 0) or 0
+        t_end = getattr(prof.meta, 'session_end_ns', 0) or 0
+        if t_end <= t_start:
+            # Fallback: try to detect from data
+            t_start = 0
+            t_end = int(60e9)  # Default 60s
+        self._json_response({
+            "time_range_ns": [t_start, t_end],
+            "gpus": gpu_infos,
+            "device_ids": devices,
+        })
+
+    def _handle_data(self):
+        """Return kernel/NVTX data for a requested time window."""
+        from urllib.parse import urlparse, parse_qs
+        from .viewer import generate_timeline_data_json
+        prof = self.__class__.prof
+        devices = self.__class__.devices
+        if not prof:
+            self._json_response({"error": "no profile"}, 500)
+            return
+        qs = parse_qs(urlparse(self.path).query)
+        try:
+            start_s = float(qs.get("start_s", [0])[0])
+            end_s = float(qs.get("end_s", [5])[0])
+        except (ValueError, IndexError):
+            start_s, end_s = 0, 5
+        trim_ns = (int(start_s * 1e9), int(end_s * 1e9))
+        try:
+            data_json = generate_timeline_data_json(prof, devices, trim_ns)
+            body = data_json.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            self._json_response({"error": str(e)}, 500)
+
+    def _json_response(self, obj, status=200):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         if self.path.split("?")[0] != "/api/chat":
@@ -222,10 +289,27 @@ def serve(prof, device: int, trim: tuple[int, int], *,
 
 # ── Mode 2: Horizontal timeline viewer ──────────────────────────
 
-def serve_timeline(prof, device: int, trim: tuple[int, int], *,
+def serve_timeline(prof, device, trim: tuple[int, int] | None = None, *,
                    port: int = 8144, open_browser: bool = True):
-    """Start a local HTTP server serving the horizontal timeline viewer."""
-    html = generate_timeline_html(prof, device, trim)
+    """Start a local HTTP server serving the horizontal timeline viewer.
+
+    If *trim* is None, the initial view shows a default 5s window and
+    the client can freely navigate via /api/data.
+    """
+    from typing import Sequence
+    devices: list[int] = list(device) if isinstance(device, Sequence) else [device]
+
+    # Store prof + devices on handler for /api/data queries
+    _ViewerHandler.prof = prof
+    _ViewerHandler.devices = devices
+
+    if trim is not None:
+        # Legacy: render full HTML with all data baked in
+        html = generate_timeline_html(prof, devices, trim)
+    else:
+        # Progressive: generate shell HTML, data fetched via /api/data
+        html = generate_timeline_html(prof, devices, None)
+
     _ViewerHandler.html_bytes = html.encode("utf-8")
 
     server = _ThreadedHTTPServer(("127.0.0.1", port), _ViewerHandler)

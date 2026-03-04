@@ -138,7 +138,7 @@ class Profile:
 
     def __init__(self, path: str):
         self.path = path
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.schema = NsightSchema(self.conn)
         self.meta = self._discover()

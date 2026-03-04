@@ -494,15 +494,146 @@
     </div>
 
     <script>
-        const DATA = $DATA;
+        const INITIAL_DATA = $DATA;
+        const PROGRESSIVE = '$PROGRESSIVE' === '1';
+        const TILE_WINDOW_S = 5;  // seconds per tile
+
         const canvas = document.getElementById('c');
         const ctx = canvas.getContext('2d');
         const wrap = document.getElementById('canvasWrap');
 
+        // ── Tile Cache ──
+        class TileCache {
+            constructor(maxBytes = 100 * 1024 * 1024) {
+                this.tiles = new Map();  // key "start_s-end_s" → {data, ts, sizeEst}
+                this.maxBytes = maxBytes;
+                this.currentBytes = 0;
+            }
+            key(startS, endS) { return `${startS.toFixed(1)}-${endS.toFixed(1)}`; }
+            has(startS, endS) { return this.tiles.has(this.key(startS, endS)); }
+            get(startS, endS) {
+                const k = this.key(startS, endS);
+                const entry = this.tiles.get(k);
+                if (entry) entry.ts = Date.now();
+                return entry ? entry.data : null;
+            }
+            put(startS, endS, data) {
+                const k = this.key(startS, endS);
+                const sizeEst = JSON.stringify(data).length * 2;  // rough byte estimate
+                // Evict oldest if over budget
+                while (this.currentBytes + sizeEst > this.maxBytes && this.tiles.size > 0) {
+                    let oldest = null, oldestKey = null;
+                    for (const [key, entry] of this.tiles) {
+                        if (!oldest || entry.ts < oldest.ts) { oldest = entry; oldestKey = key; }
+                    }
+                    if (oldestKey) {
+                        this.currentBytes -= this.tiles.get(oldestKey).sizeEst;
+                        this.tiles.delete(oldestKey);
+                    }
+                }
+                this.tiles.set(k, { data, ts: Date.now(), sizeEst });
+                this.currentBytes += sizeEst;
+            }
+            // Get all cached data merged
+            allData() {
+                const merged = { gpus: [] };
+                const gpuMap = {};
+                for (const [, entry] of this.tiles) {
+                    if (!entry.data || !entry.data.gpus) continue;
+                    for (const gpu of entry.data.gpus) {
+                        if (!gpuMap[gpu.id]) { gpuMap[gpu.id] = []; merged.gpus.push({ id: gpu.id, data: [] }); }
+                        const idx = merged.gpus.findIndex(g => g.id === gpu.id);
+                        merged.gpus[idx].data.push(...gpu.data);
+                    }
+                }
+                return merged;
+            }
+        }
+        const tileCache = new TileCache();
+        let profileMeta = null;  // {time_range_ns, gpus, device_ids}
+        let isLoading = false;
+
+        // ── Loading overlay ──
+        function showLoading(msg) {
+            let overlay = document.getElementById('loadingOverlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'loadingOverlay';
+                overlay.style.cssText = 'position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;background:rgba(13,17,23,0.8);color:#79b8ff;font-size:14px;z-index:100;pointer-events:none;';
+                wrap.style.position = 'relative';
+                wrap.appendChild(overlay);
+            }
+            overlay.textContent = msg || 'Loading…';
+            overlay.style.display = 'flex';
+        }
+        function hideLoading() {
+            const overlay = document.getElementById('loadingOverlay');
+            if (overlay) overlay.style.display = 'none';
+        }
+
+        // ── Fetch data for a time window ──
+        async function fetchTile(startS, endS) {
+            if (tileCache.has(startS, endS)) return tileCache.get(startS, endS);
+            const resp = await fetch(`/api/data?start_s=${startS}&end_s=${endS}`);
+            const data = await resp.json();
+            if (data.error) { console.error('fetchTile error:', data.error); return null; }
+            tileCache.put(startS, endS, data);
+            return data;
+        }
+
+        // ── Quantize view to tile boundaries ──
+        function tileBounds(ns) {
+            const s = ns / 1e9;
+            const startS = Math.floor(s / TILE_WINDOW_S) * TILE_WINDOW_S;
+            return [startS, startS + TILE_WINDOW_S];
+        }
+
+        // ── Load tiles covering the current viewport ──
+        async function ensureTilesForView(vStart, vEnd) {
+            const startTile = tileBounds(vStart);
+            const endTile = tileBounds(vEnd);
+            const promises = [];
+            for (let s = startTile[0]; s < endTile[1]; s += TILE_WINDOW_S) {
+                if (!tileCache.has(s, s + TILE_WINDOW_S)) {
+                    promises.push(fetchTile(s, s + TILE_WINDOW_S));
+                }
+            }
+            if (promises.length > 0) {
+                isLoading = true;
+                showLoading(`Loading ${promises.length} tile${promises.length > 1 ? 's' : ''}…`);
+                await Promise.all(promises);
+                isLoading = false;
+                hideLoading();
+                rebuildDataFromCache();
+            }
+        }
+
+        // ── Background prefetch ±1 tile on idle ──
+        function prefetchAdjacent() {
+            if (!PROGRESSIVE || typeof requestIdleCallback === 'undefined') return;
+            requestIdleCallback(() => {
+                const startTile = tileBounds(viewStart);
+                const endTile = tileBounds(viewEnd);
+                // Prefetch one tile before and after
+                const before = [startTile[0] - TILE_WINDOW_S, startTile[0]];
+                const after = [endTile[1], endTile[1] + TILE_WINDOW_S];
+                if (profileMeta) {
+                    const pStartS = profileMeta.time_range_ns[0] / 1e9;
+                    const pEndS = profileMeta.time_range_ns[1] / 1e9;
+                    if (before[0] >= pStartS && !tileCache.has(before[0], before[1])) {
+                        fetchTile(before[0], before[1]).then(() => { rebuildDataFromCache(); draw(); });
+                    }
+                    if (after[1] <= pEndS && !tileCache.has(after[0], after[1])) {
+                        fetchTile(after[0], after[1]).then(() => { rebuildDataFromCache(); draw(); });
+                    }
+                }
+            });
+        }
+
         // ── Data extraction (multi-GPU aware) ──
-        const allNodes = []; const kernels = []; const nvtxSpans = [];
-        const gpuIds = [];
-        const isMultiGPU = DATA.gpus && DATA.gpus.length > 1;
+        let allNodes = []; let kernels = []; let nvtxSpans = [];
+        let gpuIds = [];
+        let isMultiGPU = false;
 
         function extractData(nodes, path, depth, gpuId) {
             for (const n of nodes) {
@@ -519,71 +650,125 @@
 
         // Handle new multi-GPU format: {gpus: [{id, data}, ...]}
         // and legacy single-GPU format: [node, ...]
-        if (DATA.gpus) {
-            for (const gpuEntry of DATA.gpus) {
-                gpuIds.push(gpuEntry.id);
-                extractData(gpuEntry.data, '', 0, gpuEntry.id);
+        function loadFromData(DATA) {
+            if (!DATA) return;
+            if (DATA.gpus) {
+                for (const gpuEntry of DATA.gpus) {
+                    if (!gpuIds.includes(gpuEntry.id)) gpuIds.push(gpuEntry.id);
+                    extractData(gpuEntry.data, '', 0, gpuEntry.id);
+                }
+            } else if (Array.isArray(DATA)) {
+                if (!gpuIds.includes(0)) gpuIds.push(0);
+                extractData(DATA, '', 0, 0);
             }
-        } else {
-            // Legacy: flat array = single GPU
-            gpuIds.push(0);
-            extractData(DATA, '', 0, 0);
+            isMultiGPU = gpuIds.length > 1;
         }
-        kernels.sort((a, b) => a.start_ns - b.start_ns);
 
-        // Streams — keyed by "gpuId:streamId" for multi-GPU, just streamId for single
-        const streamMap = {};
-        kernels.forEach(k => {
-            const rawStream = k.stream !== undefined ? String(k.stream) : '?';
-            const key = isMultiGPU ? `${k._gpu}:${rawStream}` : rawStream;
-            k._streamKey = key;
-            if (!streamMap[key]) streamMap[key] = [];
-            streamMap[key].push(k);
-        });
+        // Streams — rebuilt with each data load
+        let streamMap = {};
+        let streamIds = [];
+        let gpuBands = [];
+        let timeStart = 0, timeEnd = 1, timeSpan = 1;
+        let nvtxMaxDepth = 0;
 
-        // Build ordered stream list: group by GPU, sorted by stream ID within each GPU
-        const streamIds = [];
-        const gpuBands = []; // [{gpuId, startIdx, endIdx}] for separator rows
-        for (const gpuId of gpuIds) {
-            const startIdx = streamIds.length;
-            const gpuStreams = Object.keys(streamMap)
-                .filter(k => isMultiGPU ? k.startsWith(gpuId + ':') : true)
-                .sort((a, b) => {
-                    const aNum = parseInt(a.split(':').pop());
-                    const bNum = parseInt(b.split(':').pop());
-                    if (!isNaN(aNum) && !isNaN(bNum)) return aNum - bNum;
-                    return a.localeCompare(b);
-                });
-            // Only add streams not already added (for single-GPU case)
-            for (const s of gpuStreams) {
-                if (!streamIds.includes(s)) streamIds.push(s);
+        function rebuildDataFromCache() {
+            // Clear and rebuild from all cached tiles (progressive) or from baked data
+            allNodes = []; kernels = []; nvtxSpans = [];
+            gpuIds = []; isMultiGPU = false;
+
+            if (PROGRESSIVE) {
+                loadFromData(tileCache.allData());
+            } else {
+                loadFromData(INITIAL_DATA);
             }
-            gpuBands.push({ gpuId, startIdx, endIdx: streamIds.length });
+            kernels.sort((a, b) => a.start_ns - b.start_ns);
+
+            // Rebuild stream map
+            streamMap = {};
+            kernels.forEach(k => {
+                const rawStream = k.stream !== undefined ? String(k.stream) : '?';
+                const key = isMultiGPU ? `${k._gpu}:${rawStream}` : rawStream;
+                k._streamKey = key;
+                if (!streamMap[key]) streamMap[key] = [];
+                streamMap[key].push(k);
+            });
+
+            // Build ordered stream list: group by GPU
+            streamIds = [];
+            gpuBands = [];
+            for (const gpuId of gpuIds) {
+                const startIdx = streamIds.length;
+                const gpuStreams = Object.keys(streamMap)
+                    .filter(k => isMultiGPU ? k.startsWith(gpuId + ':') : true)
+                    .sort((a, b) => {
+                        const aNum = parseInt(a.split(':').pop());
+                        const bNum = parseInt(b.split(':').pop());
+                        if (!isNaN(aNum) && !isNaN(bNum)) return aNum - bNum;
+                        return a.localeCompare(b);
+                    });
+                for (const s of gpuStreams) {
+                    if (!streamIds.includes(s)) streamIds.push(s);
+                }
+                gpuBands.push({ gpuId, startIdx, endIdx: streamIds.length });
+            }
+            Object.values(streamMap).forEach(ks => ks.sort((a, b) => a.start_ns - b.start_ns));
+
+            // Time bounds
+            timeStart = kernels.length ? Math.min(...kernels.map(k => k.start_ns), ...nvtxSpans.map(s => s.start)) : 0;
+            timeEnd = kernels.length ? Math.max(...kernels.map(k => k.end_ns), ...nvtxSpans.map(s => s.end)) : 1;
+            timeSpan = Math.max(timeEnd - timeStart, 1);
+
+            // NVTX depth
+            nvtxMaxDepth = nvtxSpans.length ? Math.min(6, Math.max(...nvtxSpans.map(s => s.depth)) + 1) : 0;
+
+            // Stats
+            const totalKernels = kernels.length;
+            const totalNVTX = nvtxSpans.length;
+            const totalMs = kernels.reduce((a, k) => a + k.duration_ms, 0);
+            const gpuCountLabel = gpuIds.length > 1 ? `GPUs: <strong>${gpuIds.length}</strong> &nbsp; ` : '';
+            document.getElementById('stats').innerHTML =
+                gpuCountLabel +
+                (PROGRESSIVE ? `<span style="color:#238636">● Progressive</span> &nbsp; ` : '') +
+                `<span>Kernels: <strong>${totalKernels}</strong></span> &nbsp; ` +
+                `<span>NVTX: <strong>${totalNVTX}</strong></span> &nbsp; ` +
+                `<span>GPU time: <strong>${totalMs.toFixed(1)}ms</strong></span>`;
         }
-        Object.values(streamMap).forEach(ks => ks.sort((a, b) => a.start_ns - b.start_ns));
 
-        // Time bounds
-        const timeStart = kernels.length ? Math.min(...kernels.map(k => k.start_ns), ...nvtxSpans.map(s => s.start)) : 0;
-        const timeEnd = kernels.length ? Math.max(...kernels.map(k => k.end_ns), ...nvtxSpans.map(s => s.end)) : 1;
-        const timeSpan = Math.max(timeEnd - timeStart, 1);
-
-        // NVTX depth
-        const nvtxMaxDepth = nvtxSpans.length ? Math.min(6, Math.max(...nvtxSpans.map(s => s.depth)) + 1) : 0;
-
-        // Stats
-        const totalKernels = kernels.length;
-        const totalNVTX = nvtxSpans.length;
-        const totalMs = kernels.reduce((a, k) => a + k.duration_ms, 0);
-        const gpuCountLabel = gpuIds.length > 1 ? `GPUs: <strong>${gpuIds.length}</strong> &nbsp; ` : '';
-        document.getElementById('stats').innerHTML =
-            gpuCountLabel +
-            `<span>Kernels: <strong>${totalKernels}</strong></span> &nbsp; ` +
-            `<span>NVTX: <strong>${totalNVTX}</strong></span> &nbsp; ` +
-            `<span>GPU time: <strong>${totalMs.toFixed(1)}ms</strong></span>`;
+        // ── Initialization ──
+        async function initData() {
+            if (INITIAL_DATA !== null) {
+                // Baked-in data mode (--trim was specified)
+                rebuildDataFromCache();
+                viewStart = timeStart - timeSpan * 0.02;
+                viewEnd = timeEnd + timeSpan * 0.02;
+                resize();
+                return;
+            }
+            // Progressive mode: fetch metadata, then first window
+            showLoading('Loading profile metadata…');
+            try {
+                const metaResp = await fetch('/api/meta');
+                profileMeta = await metaResp.json();
+                // Default view: first 5 seconds
+                const pStartS = profileMeta.time_range_ns[0] / 1e9;
+                const firstEnd = pStartS + TILE_WINDOW_S;
+                await fetchTile(pStartS, firstEnd);
+                rebuildDataFromCache();
+                viewStart = pStartS * 1e9;
+                viewEnd = firstEnd * 1e9;
+                hideLoading();
+                resize();
+                prefetchAdjacent();
+            } catch (e) {
+                hideLoading();
+                console.error('initData failed:', e);
+                document.getElementById('detail').textContent = 'Failed to load profile: ' + e.message;
+            }
+        }
 
         // ── State ──
-        let viewStart = timeStart - timeSpan * 0.02;
-        let viewEnd = timeEnd + timeSpan * 0.02;
+        let viewStart = 0;
+        let viewEnd = 1;
         let selectedKernel = null;
         let selectedStreamIdx = 0;
         let showNVTX = true;
@@ -947,11 +1132,24 @@
         function escH(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
         // ── Navigation ──
+        // ── Progressive tile loading on viewport change ──
+        let _viewChangeTimer = null;
+        function afterViewChange() {
+            if (!PROGRESSIVE) return;
+            clearTimeout(_viewChangeTimer);
+            _viewChangeTimer = setTimeout(async () => {
+                await ensureTilesForView(viewStart, viewEnd);
+                resize();
+                prefetchAdjacent();
+            }, 150);
+        }
+
         function panBy(fraction) {
             const span = viewEnd - viewStart;
             const delta = span * fraction;
             viewStart += delta; viewEnd += delta;
             draw();
+            afterViewChange();
         }
         function zoomAt(factor, centerNs) {
             if (centerNs === undefined) centerNs = (viewStart + viewEnd) / 2;
@@ -963,6 +1161,7 @@
             viewStart = centerNs - newSpan * ratio;
             viewEnd = centerNs + newSpan * (1 - ratio);
             draw();
+            afterViewChange();
         }
         function zoomIn() { zoomAt(0.5); }
         function zoomOut() { zoomAt(2); }
@@ -1055,6 +1254,7 @@
                 const w = canvas.width / DPR - LABEL_W;
                 const nsPerPx = (dragViewEnd - dragViewStart) / w;
                 viewStart = dragViewStart - dx * nsPerPx;
+                afterViewChange();
                 viewEnd = dragViewEnd - dx * nsPerPx;
                 draw();
                 return;
@@ -1366,7 +1566,8 @@
         loadModels();
 
         // ── Init ──
-        setTimeout(resize, 0);
+        // ── Init ──
+        setTimeout(initData, 0);
     </script>
 </body>
 
