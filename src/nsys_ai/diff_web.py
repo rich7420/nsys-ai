@@ -47,7 +47,7 @@ class _DiffHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/timeline/"):
             parts = path.split("/")
-            if len(parts) >= 5 and parts[4] == "api":
+            if len(parts) >= 6 and parts[4] == "api":
                 side = parts[3]
                 endpoint = parts[5]
                 if endpoint == "meta":
@@ -58,6 +58,18 @@ class _DiffHandler(BaseHTTPRequestHandler):
                     return
                 elif endpoint == "models":
                     self._json_response({"options": [], "default": None})
+                    return
+                elif endpoint == "chat":
+                    self._json_response(
+                        {"error": "Chat is not available in diff-web iframe"},
+                        status=501,
+                    )
+                    return
+                else:
+                    self._json_response(
+                        {"error": "Unknown timeline endpoint", "endpoint": endpoint},
+                        status=404,
+                    )
                     return
 
         # Serve timeline assets if requested

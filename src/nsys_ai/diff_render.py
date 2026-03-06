@@ -429,9 +429,12 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "after_count": n.after_count,
                 "classification": n.classification,
             }
-            for n in data.nvtx_diffs
-            if n.delta_ns > 0
-        ][:20],
+            for n in sorted(
+                (n for n in data.nvtx_diffs if n.delta_ns > 0),
+                key=lambda x: x.delta_ns,
+                reverse=True,
+            )[:20]
+        ],
         "nvtx_improvements": [
             {
                 "text": n.text,
@@ -442,9 +445,11 @@ def to_diff_json(data: ProfileDiffSummary) -> str:
                 "after_count": n.after_count,
                 "classification": n.classification,
             }
-            for n in data.nvtx_diffs
-            if n.delta_ns < 0
-        ][:20],
+            for n in sorted(
+                (n for n in data.nvtx_diffs if n.delta_ns < 0),
+                key=lambda x: x.delta_ns,
+            )[:20]
+        ],
         "overlap": {
             "before": data.overlap_before,
             "after": data.overlap_after,

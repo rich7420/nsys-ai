@@ -2391,7 +2391,8 @@ function executeAIAction(action) {
         if (target) {
             const k = kernels.find(k => k.name.includes(target));
             if (k) {
-                const si = streamIds.indexOf(String(k.stream));
+                const streamKey = k._streamKey != null ? k._streamKey : String(k.stream);
+                const si = streamIds.indexOf(streamKey);
                 if (si >= 0) selectedStreamIdx = si;
                 updateNvtxThreadOptions();
                 maybeFetchNvtxForCurrentView();
