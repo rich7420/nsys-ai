@@ -117,7 +117,7 @@ def format_diff_terminal_multi(
     parts: list[str] = []
 
     # 1) Global section (reuse single-GPU formatter but tweak header)
-    header = f"Profile Diff (All GPUs)\n" + "─" * 60 + "\n"
+    header = "Profile Diff (All GPUs)\n" + "─" * 60 + "\n"
     global_block = format_diff_terminal(global_summary)
     # Drop the first two lines ("Profile Diff" + underline) from the reused block.
     gl_lines = global_block.splitlines()
@@ -203,7 +203,7 @@ def format_diff_markdown(data: ProfileDiffSummary) -> str:
             md.append("_none_")
             md.append("")
             return
-            
+
         icon = "🚨 " if is_regression else "✅ "
         md.append("| Δ | kernel | before | after | count |")
         md.append("|---:|---|---:|---:|---:|")
@@ -214,7 +214,7 @@ def format_diff_markdown(data: ProfileDiffSummary) -> str:
                 c_str = f"**0 → {kd.after_count}**"
             elif kd.classification == "removed":
                 c_str = f"**{kd.before_count} → 0**"
-                
+
             md.append(
                 f"| {icon}`{_fmt_delta_ns(kd.delta_ns)}` | `{kd.name}` | `{_fmt_ns(kd.before_total_ns)}` ({_fmt_pct(kd.before_share)}) | `{_fmt_ns(kd.after_total_ns)}` ({_fmt_pct(kd.after_share)}) | {c_str} |"
             )
@@ -318,8 +318,9 @@ def format_diff_markdown_multi(
                     c_str = f"**0 → {kd.after_count}**"
                 elif kd.classification == "removed":
                     c_str = f"**{kd.before_count} → 0**"
+                delta_str = ("+" if kd.delta_ns > 0 else "") + _fmt_delta_ns(kd.delta_ns)
                 md.append(
-                    f"| `{"+" if kd.delta_ns > 0 else ""}{_fmt_ns(kd.delta_ns)}` | `{kd.name}` | "
+                    f"| `{delta_str}` | `{kd.name}` | "
                     f"`{_fmt_ns(kd.before_total_ns)}` ({_fmt_pct(kd.before_share)}) | "
                     f"`{_fmt_ns(kd.after_total_ns)}` ({_fmt_pct(kd.after_share)}) | {c_str} |"
                 )

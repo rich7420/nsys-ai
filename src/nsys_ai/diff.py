@@ -159,14 +159,14 @@ def build_profile_summary(
                 overlap["total_ms"] += dev_stats.get("total_ms", 0.0)
                 overlap["compute_kernels"] += dev_stats.get("compute_kernels", 0)
                 overlap["nccl_kernels"] += dev_stats.get("nccl_kernels", 0)
-        
+
         # Round logic to avoid float drift, and set a clean combined overlap pct
         # Node-wide idle logic is tricky because overlap might not overlap across GPUs perfectly,
         # but summing them gives a sense of "total wasted throughput".
         if overlap["nccl_only_ms"] + overlap["overlap_ms"] > 0:
             c_nccl = overlap["nccl_only_ms"] + overlap["overlap_ms"]
             overlap["overlap_pct"] = round(100 * overlap["overlap_ms"] / c_nccl, 1)
-        
+
         for k in ("compute_only_ms", "nccl_only_ms", "overlap_ms", "idle_ms", "total_ms"):
             overlap[k] = round(overlap[k], 2)
 
@@ -197,7 +197,7 @@ def collect_sanity_warnings(before: ProfileSummary, after: ProfileSummary) -> li
             warnings.append(
                 f"Kernel row counts differ a lot (before={before.kernel_rows}, after={after.kernel_rows}); compare may be dominated by workload differences."
             )
-            
+
     b_keys = {k.key for k in before.kernels}
     a_keys = {k.key for k in after.kernels}
     if b_keys and a_keys:
