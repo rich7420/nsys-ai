@@ -8,8 +8,8 @@ training; user can override if using FP8/TF32.
 
 from __future__ import annotations
 
-# Peak TFLOPS for BF16/FP16 Tensor Core (typical training). With sparsity where noted.
-# Sources: NVIDIA datasheets (A100, H100). Prefer conservative figures.
+# Peak TFLOPS for BF16/FP16 Tensor Core (typical training), dense (no sparsity).
+# Sources: NVIDIA datasheets (A100, H100, L40). Prefer conservative figures.
 GPU_PEAK_TFLOPS: dict[str, float] = {
     "H100 SXM": 989.0,
     "H100 80GB HBM3": 989.0,

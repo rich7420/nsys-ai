@@ -438,7 +438,7 @@ def test_profile_get_first_gpu_name(tmp_path):
 
 def test_mfu_single_and_compare():
     """MFU lives in nsys_ai.mfu; single and compare are pure math."""
-    from nsys_ai.mfu import compute_mfu_single, compute_mfu_compare
+    from nsys_ai.mfu import compute_mfu_compare, compute_mfu_single
 
     out = compute_mfu_single(10.0, 1e18, 989.0)
     assert out["MFU_pct"] == round(100.0 * (1e18 / 10.0 / 1e12) / 989.0, 2)

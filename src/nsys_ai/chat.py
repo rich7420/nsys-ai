@@ -44,6 +44,7 @@ from .diff_tools import (
     run_diff_tool,
 )
 from .hardware import get_peak_tflops
+from .mfu import compute_mfu_from_args
 from .profile import get_first_gpu_name
 
 _log = logging.getLogger(__name__)
@@ -601,7 +602,6 @@ def stream_agent_loop(
                         args = json.loads(args_str) if args_str.strip() else {}
                     except json.JSONDecodeError:
                         args = {}
-                    from .mfu import compute_mfu_from_args
                     result = compute_mfu_from_args(args)
                     api_messages.append({
                         "role": "tool",

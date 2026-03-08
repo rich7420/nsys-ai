@@ -24,10 +24,10 @@ from dataclasses import dataclass, field
 
 from .ai.backend.chat_tools import TOOL_COMPUTE_MFU, TOOL_GET_GPU_PEAK_TFLOPS
 from .diff import ProfileDiffSummary, diff_profiles
+from .hardware import get_peak_tflops
 from .mfu import compute_mfu_from_args
 from .nvtx_tree import build_nvtx_tree
 from .overlap import detect_iterations, overlap_analysis
-from .hardware import get_peak_tflops
 from .profile import Profile
 
 
