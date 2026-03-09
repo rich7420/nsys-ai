@@ -9,6 +9,7 @@ This module is the "data / prompt" boundary:
 
 It does NOT make any LLM API calls (those live in chat.py).
 """
+
 from __future__ import annotations
 
 import json
@@ -28,9 +29,18 @@ TOOL_COMPUTE_MFU = {
         "parameters": {
             "type": "object",
             "properties": {
-                "step_time_s": {"type": "number", "description": "Step or profile span in seconds (from query_profile_db or summary)."},
-                "model_flops_per_step": {"type": "number", "description": "Model FLOPs per step (user must provide; e.g. 6*N_params*tokens for Transformer)."},
-                "peak_tflops": {"type": "number", "description": "GPU peak TFLOPS for precision (e.g. 989 for H100 FP16, 312 for A100 FP16)."},
+                "step_time_s": {
+                    "type": "number",
+                    "description": "Step or profile span in seconds (from query_profile_db or summary).",
+                },
+                "model_flops_per_step": {
+                    "type": "number",
+                    "description": "Model FLOPs per step (user must provide; e.g. 6*N_params*tokens for Transformer).",
+                },
+                "peak_tflops": {
+                    "type": "number",
+                    "description": "GPU peak TFLOPS for precision (e.g. 989 for H100 FP16, 312 for A100 FP16).",
+                },
             },
             "required": ["step_time_s", "model_flops_per_step", "peak_tflops"],
         },
@@ -103,6 +113,7 @@ TOOL_GET_GPU_PEAK_TFLOPS = {
 # Tool definitions (OpenAI function-calling format)
 # ---------------------------------------------------------------------------
 
+
 def _tools_openai() -> list[dict]:
     """Return the OpenAI-style tool list for single-profile chat."""
     return [
@@ -145,7 +156,7 @@ def _tools_openai() -> list[dict]:
                     "type": "object",
                     "properties": {
                         "start_s": {"type": "number", "description": "Start time in seconds"},
-                        "end_s":   {"type": "number", "description": "End time in seconds"},
+                        "end_s": {"type": "number", "description": "End time in seconds"},
                     },
                     "required": ["start_s", "end_s"],
                 },
@@ -187,6 +198,7 @@ def _tools_openai() -> list[dict]:
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
+
 
 def _build_system_prompt(
     ui_context: dict,
@@ -260,6 +272,7 @@ def _build_system_prompt(
 # ---------------------------------------------------------------------------
 # Tool-call parsing — converts raw LLM function calls to UI action dicts
 # ---------------------------------------------------------------------------
+
 
 def _parse_tool_call(name: str, arguments: str) -> dict | None:
     """Parse a tool call into a UI action dict, or ``None`` if unrecognised.

@@ -131,4 +131,3 @@ def test_compute_region_mfu_from_conn_happy_path(tmp_path):
         assert "mfu_pct_kernel_union" in result
     finally:
         conn.close()
-

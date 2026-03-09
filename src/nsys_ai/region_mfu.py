@@ -26,14 +26,13 @@ with either data fields or an "error" block:
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from .hardware import get_peak_tflops
 from .profile import NsightSchema, get_first_gpu_name, resolve_profile_path
 
-
-ErrorDict = Dict[str, Any]
-RowDict = Dict[str, Any]
+ErrorDict = dict[str, Any]
+RowDict = dict[str, Any]
 
 
 def _error(code: str, message: str) -> ErrorDict:
@@ -55,7 +54,7 @@ def find_nvtx_ranges(
     nvtx_name: str,
     *,
     match_mode: str = "contains",
-) -> List[RowDict]:
+) -> list[RowDict]:
     """
     Find NVTX ranges whose resolved text matches ``nvtx_name``.
 
@@ -87,7 +86,7 @@ def find_nvtx_ranges(
             "WHERE n.text IS NOT NULL AND n.[end] > n.start "
         )
 
-    params: List[Any] = []
+    params: list[Any] = []
     if match_mode == "exact":
         base_sql += "AND text = ? "
         params.append(nvtx_name)
@@ -98,7 +97,7 @@ def find_nvtx_ranges(
     base_sql += "ORDER BY start_ns"
 
     cur = conn.execute(base_sql, params)
-    rows: List[RowDict] = []
+    rows: list[RowDict] = []
     for text, start_ns, end_ns, global_tid in cur.fetchall():
         if text is None:
             continue
@@ -117,7 +116,7 @@ def find_nvtx_ranges(
     return rows
 
 
-def select_nvtx_occurrence(matches: List[RowDict], occurrence_index: int) -> RowDict | ErrorDict:
+def select_nvtx_occurrence(matches: list[RowDict], occurrence_index: int) -> RowDict | ErrorDict:
     """
     Pick the N-th NVTX match (1-based). Returns the row dict or an error.
     """
@@ -140,9 +139,9 @@ def get_region_kernels(
     *,
     nvtx_start_ns: int,
     nvtx_end_ns: int,
-    global_tid: Optional[int],
-    device_id: Optional[int],
-) -> List[RowDict]:
+    global_tid: int | None,
+    device_id: int | None,
+) -> list[RowDict]:
     """
     Attribute kernels to an NVTX region via CUPTI_ACTIVITY_KIND_RUNTIME.correlationId.
 
@@ -158,7 +157,7 @@ def get_region_kernels(
     kernel_table = schema.kernel_table
 
     where_clauses = ["r.start >= ?", "r.[end] <= ?"]
-    params: List[Any] = [int(nvtx_start_ns), int(nvtx_end_ns)]
+    params: list[Any] = [int(nvtx_start_ns), int(nvtx_end_ns)]
 
     if global_tid is not None:
         where_clauses.append("r.globalTid = ?")
@@ -179,14 +178,12 @@ def get_region_kernels(
         "FROM CUPTI_ACTIVITY_KIND_RUNTIME r "
         f"JOIN {kernel_table} k ON r.correlationId = k.correlationId "
         "LEFT JOIN StringIds s ON k.shortName = s.id "
-        "WHERE "
-        + " AND ".join(where_clauses)
-        + f" {dev_filter} "
+        "WHERE " + " AND ".join(where_clauses) + f" {dev_filter} "
         "ORDER BY start_ns"
     )
 
     cur = conn.execute(sql, params)
-    kernels: List[RowDict] = []
+    kernels: list[RowDict] = []
     for row in cur.fetchall():
         (
             correlation_id,
@@ -216,7 +213,7 @@ def get_region_kernels(
     return kernels
 
 
-def _merge_intervals(intervals: List[Tuple[int, int]]) -> int:
+def _merge_intervals(intervals: list[tuple[int, int]]) -> int:
     """Return total union length for a list of [start, end] intervals in ns."""
     if not intervals:
         return 0
@@ -234,7 +231,7 @@ def _merge_intervals(intervals: List[Tuple[int, int]]) -> int:
     return total
 
 
-def summarize_region_kernel_times(kernels: List[RowDict]) -> RowDict:
+def summarize_region_kernel_times(kernels: list[RowDict]) -> RowDict:
     """
     Summarize kernel timings and coverage for a region.
 
@@ -260,12 +257,8 @@ def summarize_region_kernel_times(kernels: List[RowDict]) -> RowDict:
     intervals = [(int(k["start_ns"]), int(k["end_ns"])) for k in kernels]
     kernel_union_ns = _merge_intervals(intervals)
 
-    devs = sorted(
-        {int(k["device_id"]) for k in kernels if k.get("device_id") is not None}
-    )
-    streams = sorted(
-        {int(k["stream_id"]) for k in kernels if k.get("stream_id") is not None}
-    )
+    devs = sorted({int(k["device_id"]) for k in kernels if k.get("device_id") is not None})
+    streams = sorted({int(k["stream_id"]) for k in kernels if k.get("stream_id") is not None})
 
     return {
         "kernel_count": len(kernels),
@@ -328,7 +321,7 @@ def compute_mfu_metrics_for_region(
     }
 
 
-def _auto_peak_tflops(conn: sqlite3.Connection, explicit_peak: Optional[float]) -> RowDict | ErrorDict:
+def _auto_peak_tflops(conn: sqlite3.Connection, explicit_peak: float | None) -> RowDict | ErrorDict:
     """
     Resolve peak_tflops either from explicit value or from profile GPU name.
     """
@@ -357,13 +350,13 @@ def _auto_peak_tflops(conn: sqlite3.Connection, explicit_peak: Optional[float]) 
 
 def compute_region_mfu_from_conn(
     conn: sqlite3.Connection,
-    profile_path: Optional[str],
+    profile_path: str | None,
     nvtx_name: str,
     theoretical_flops: float,
     *,
-    peak_tflops: Optional[float] = None,
+    peak_tflops: float | None = None,
     occurrence_index: int = 1,
-    device_id: Optional[int] = None,
+    device_id: int | None = None,
     match_mode: str = "contains",
 ) -> RowDict | ErrorDict:
     """
@@ -414,9 +407,7 @@ def compute_region_mfu_from_conn(
 
     wall_time_s = wall_time_ns / 1e9
     kernel_sum_s = summary["kernel_sum_ns"] / 1e9 if summary["kernel_sum_ns"] > 0 else 0.0
-    kernel_union_s = (
-        summary["kernel_union_ns"] / 1e9 if summary["kernel_union_ns"] > 0 else 0.0
-    )
+    kernel_union_s = summary["kernel_union_ns"] / 1e9 if summary["kernel_union_ns"] > 0 else 0.0
 
     # 3) Resolve peak_tflops
     peak_info = _auto_peak_tflops(conn, peak_tflops)
@@ -458,9 +449,9 @@ def compute_region_mfu(
     nvtx_name: str,
     theoretical_flops: float,
     *,
-    peak_tflops: Optional[float] = None,
+    peak_tflops: float | None = None,
     occurrence_index: int = 1,
-    device_id: Optional[int] = None,
+    device_id: int | None = None,
     match_mode: str = "contains",
 ) -> RowDict | ErrorDict:
     """
@@ -491,4 +482,3 @@ def compute_region_mfu(
         )
     finally:
         conn.close()
-

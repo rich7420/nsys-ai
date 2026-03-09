@@ -1,4 +1,5 @@
 """Unit tests for nsys_ai.chat (AI Brain + Navigator)."""
+
 import json
 import sys
 from unittest.mock import MagicMock, patch
@@ -148,9 +149,7 @@ def test_parse_tool_call_navigate_missing_target():
 
 def test_parse_tool_call_zoom():
     """zoom_to_time_range parses start_s and end_s."""
-    action = chat_mod._parse_tool_call(
-        "zoom_to_time_range", '{"start_s": 1.5, "end_s": 2.5}'
-    )
+    action = chat_mod._parse_tool_call("zoom_to_time_range", '{"start_s": 1.5, "end_s": 2.5}')
     assert action == {
         "type": "zoom_to_time_range",
         "start_s": 1.5,
@@ -178,9 +177,7 @@ def test_parse_tool_call_fit_nvtx_by_name():
 
 def test_parse_tool_call_fit_nvtx_by_time_range():
     """fit_nvtx_range can target by explicit start/end seconds."""
-    action = chat_mod._parse_tool_call(
-        "fit_nvtx_range", '{"start_s": 35.0, "end_s": 35.4}'
-    )
+    action = chat_mod._parse_tool_call("fit_nvtx_range", '{"start_s": 35.0, "end_s": 35.4}')
     assert action == {
         "type": "fit_nvtx_range",
         "start_s": 35.0,
@@ -260,7 +257,9 @@ def test_chat_completion_tool_calls_mock(monkeypatch):
     with patch.dict(sys.modules, {"litellm": mock_lt}):
         if "litellm" in chat_mod.__dict__:
             del chat_mod.__dict__["litellm"]
-        body = json.dumps({"messages": [{"role": "user", "content": "go to kernel_a"}]}).encode("utf-8")
+        body = json.dumps({"messages": [{"role": "user", "content": "go to kernel_a"}]}).encode(
+            "utf-8"
+        )
         out = chat_mod.chat_completion(body)
     assert out is not None
     assert out["content"] == "Going there."
@@ -423,10 +422,14 @@ def test_stream_agent_loop_yields_action_and_done(monkeypatch):
     """stream_agent_loop with navigate_to_kernel yields action event then done (§11.8.4)."""
     # Chunk 1: text delta
     chunk_text = MagicMock()
-    chunk_text.choices = [MagicMock(delta=MagicMock(
-        content="Going there.",
-        tool_calls=[],
-    ))]
+    chunk_text.choices = [
+        MagicMock(
+            delta=MagicMock(
+                content="Going there.",
+                tool_calls=[],
+            )
+        )
+    ]
     chunk_text.usage = None
     # Chunk 2: tool_call delta
     fn_delta = MagicMock()
@@ -472,9 +475,29 @@ def test_compact_old_tool_results_compacts_previous_turns():
     api_messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "q"},
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "query_profile_db", "arguments": "{}"}}]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "query_profile_db", "arguments": "{}"},
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "c1", "name": "query_profile_db", "content": "x" * 300},
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "c2", "type": "function", "function": {"name": "query_profile_db", "arguments": "{}"}}]},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c2",
+                    "type": "function",
+                    "function": {"name": "query_profile_db", "arguments": "{}"},
+                }
+            ],
+        },
         {"role": "tool", "tool_call_id": "c2", "name": "query_profile_db", "content": "y" * 300},
     ]
     chat_mod._compact_old_tool_results(api_messages)
@@ -492,6 +515,7 @@ def test_compact_old_tool_results_noop_first_turn():
         {"role": "tool", "tool_call_id": "c1", "content": "z" * 300},
     ]
     import copy
+
     original = copy.deepcopy(api_messages)
     chat_mod._compact_old_tool_results(api_messages)
     assert api_messages == original
@@ -613,10 +637,19 @@ def test_distill_history_compresses_tool_turns():
             "role": "assistant",
             "content": None,
             "tool_calls": [
-                {"id": "c1", "type": "function", "function": {"name": "query_profile_db", "arguments": "{}"}}
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "query_profile_db", "arguments": "{}"},
+                }
             ],
         },
-        {"role": "tool", "tool_call_id": "c1", "name": "query_profile_db", "content": '[{"name": "axpy", "total_ms": 42}]'},
+        {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "name": "query_profile_db",
+            "content": '[{"name": "axpy", "total_ms": 42}]',
+        },
         # Final assistant answer (no tool_calls)
         {"role": "assistant", "content": "The slowest kernel is axpy at 42ms."},
     ]
