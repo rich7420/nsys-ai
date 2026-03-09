@@ -8,7 +8,7 @@ This module implements a higher-level "region MFU" tool that:
   correlationId (same semantics as nvtx_tree.py, but specialized for a single
   region instead of building a full tree).
 - Aggregates time in three ways:
-    * wall_time_ns: NVTX GPU span (end - start)
+    * wall_time_ns: NVTX range span (end − start)
     * kernel_sum_ns: sum of child kernel durations
     * kernel_union_ns: union-of-intervals over child kernels (no double-counting)
 - Computes MFU for the region given theoretical FLOPs and peak TFLOPS.
@@ -87,11 +87,16 @@ def find_nvtx_ranges(
         )
 
     params: list[Any] = []
+    if has_text_id:
+        text_expr = "COALESCE(n.text, s.value)"
+    else:
+        text_expr = "n.text"
+
     if match_mode == "exact":
-        base_sql += "AND text = ? "
+        base_sql += f"AND {text_expr} = ? "
         params.append(nvtx_name)
     else:
-        base_sql += "AND text LIKE ? "
+        base_sql += f"AND {text_expr} LIKE ? "
         params.append(f"%{nvtx_name}%")
 
     base_sql += "ORDER BY start_ns"

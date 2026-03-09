@@ -131,3 +131,95 @@ def test_compute_region_mfu_from_conn_happy_path(tmp_path):
         assert "mfu_pct_kernel_union" in result
     finally:
         conn.close()
+
+
+def _make_textid_region_db(path: str):
+    """Create a DB using the newer textId→StringIds schema (n.text IS NULL)."""
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE StringIds(id INT PRIMARY KEY, value TEXT)")
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL("
+        "start INT, [end] INT, deviceId INT, streamId INT, correlationId INT, "
+        "shortName INT, demangledName INT)"
+    )
+    conn.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME(globalTid INT, correlationId INT, start INT, [end] INT)"
+    )
+    # textId column present → triggers has_text_id detection
+    conn.execute(
+        "CREATE TABLE NVTX_EVENTS(text TEXT, textId INT, globalTid INT, start INT, [end] INT)"
+    )
+    conn.execute(
+        "CREATE TABLE TARGET_INFO_GPU(id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT, "
+        "totalMemory INTEGER, smCount INTEGER, chipName TEXT, memoryBandwidth INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE TARGET_INFO_CUDA_DEVICE(gpuId INTEGER, cudaId INTEGER, pid INTEGER, uuid TEXT, numMultiprocessors INTEGER)"
+    )
+    conn.execute("INSERT INTO TARGET_INFO_GPU(id, name) VALUES (0, 'NVIDIA H100 80GB HBM3')")
+    conn.execute("INSERT INTO TARGET_INFO_CUDA_DEVICE(gpuId, cudaId) VALUES (0, 0)")
+
+    # String IDs: 10='FlashAttnFwd', 1='k_flash', 2='k_flash_dem'
+    conn.execute(
+        "INSERT INTO StringIds(id, value) VALUES (1,'k_flash'), (2,'k_flash_dem'), (10,'FlashAttnFwd')"
+    )
+    # Kernel
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL(start, [end], deviceId, streamId, correlationId, shortName, demangledName) "
+        "VALUES (1000, 2000, 0, 7, 1, 1, 2)"
+    )
+    # NVTX row: text IS NULL, textId=10 → resolved via StringIds to 'FlashAttnFwd'
+    conn.execute(
+        "INSERT INTO NVTX_EVENTS(text, textId, globalTid, start, [end]) VALUES (NULL, 10, 1, 500, 2500)"
+    )
+    # Runtime launch inside the NVTX span
+    conn.execute(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME(globalTid, correlationId, start, [end]) "
+        "VALUES (1, 1, 900, 1000)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_find_nvtx_ranges_with_textid_schema(tmp_path):
+    """Ensure find_nvtx_ranges resolves names via textId→StringIds when n.text IS NULL."""
+    db = tmp_path / "textid.sqlite"
+    _make_textid_region_db(str(db))
+    conn = sqlite3.connect(str(db))
+    try:
+        # exact match
+        rows = find_nvtx_ranges(conn, "FlashAttnFwd", match_mode="exact")
+        assert len(rows) == 1
+        assert rows[0]["text"] == "FlashAttnFwd"
+
+        # contains match
+        rows = find_nvtx_ranges(conn, "FlashAttn", match_mode="contains")
+        assert len(rows) == 1
+        assert rows[0]["text"] == "FlashAttnFwd"
+    finally:
+        conn.close()
+
+
+def test_compute_region_mfu_from_conn_textid_schema(tmp_path):
+    """End-to-end test with textId schema variant."""
+    db = tmp_path / "textid_mfu.sqlite"
+    _make_textid_region_db(str(db))
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        result = compute_region_mfu_from_conn(
+            conn,
+            str(db),
+            "FlashAttnFwd",
+            theoretical_flops=1e18,
+            peak_tflops=None,
+            occurrence_index=1,
+            device_id=0,
+            match_mode="exact",
+        )
+        assert "error" not in result, f"Unexpected error: {result}"
+        assert result["matched_text"] == "FlashAttnFwd"
+        assert result["kernel_count"] == 1
+        assert "mfu_pct_wall" in result
+    finally:
+        conn.close()
