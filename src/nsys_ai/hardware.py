@@ -12,8 +12,8 @@ Lookup strategy:
 
 from __future__ import annotations
 
-import subprocess
 import re
+import subprocess  # nosec B404 — only used for hardcoded nvidia-smi
 
 # ---------------------------------------------------------------------------
 # Peak TFLOPS for BF16/FP16 Tensor Core, DENSE (no sparsity).
@@ -128,7 +128,7 @@ def detect_gpu_from_nvidia_smi() -> dict:
     TARGET_INFO_CUDA_GPU) or explicit user-provided peak_tflops.
     """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607 — hardcoded command, no user input
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True,
             text=True,

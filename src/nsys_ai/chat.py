@@ -707,25 +707,44 @@ def stream_agent_loop(
                             args = json.loads(args_str) if args_str.strip() else {}
                         except json.JSONDecodeError:
                             args = {}
-                        result = compute_region_mfu_from_conn(
-                            conn,
-                            sqlite_path,
-                            args.get("nvtx_name") or "",
-                            float(args.get("theoretical_flops") or 0.0),
-                            peak_tflops=(
-                                float(args["peak_tflops"])
-                                if "peak_tflops" in args and args["peak_tflops"] is not None
-                                else None
-                            ),
-                            num_gpus=int(args.get("num_gpus") or 1),
-                            occurrence_index=int(args.get("occurrence_index") or 1),
-                            device_id=(
-                                int(args["device_id"])
-                                if "device_id" in args and args["device_id"] is not None
-                                else None
-                            ),
-                            match_mode=str(args.get("match_mode") or "contains"),
-                        )
+                        # Validate required params before calling
+                        nvtx_name = args.get("nvtx_name") or ""
+                        raw_flops = args.get("theoretical_flops")
+                        if not nvtx_name:
+                            result = {
+                                "error": {
+                                    "code": "MISSING_PARAMETER",
+                                    "message": "nvtx_name is required.",
+                                }
+                            }
+                        elif raw_flops is None or float(raw_flops) <= 0:
+                            result = {
+                                "error": {
+                                    "code": "MISSING_PARAMETER",
+                                    "message": "theoretical_flops is required and must be positive. "
+                                    "Compute it from model architecture using the MFU REFERENCE FORMULAS.",
+                                }
+                            }
+                        else:
+                            result = compute_region_mfu_from_conn(
+                                conn,
+                                sqlite_path,
+                                nvtx_name,
+                                float(raw_flops),
+                                peak_tflops=(
+                                    float(args["peak_tflops"])
+                                    if "peak_tflops" in args and args["peak_tflops"] is not None
+                                    else None
+                                ),
+                                num_gpus=int(args.get("num_gpus") or 1),
+                                occurrence_index=int(args.get("occurrence_index") or 1),
+                                device_id=(
+                                    int(args["device_id"])
+                                    if "device_id" in args and args["device_id"] is not None
+                                    else None
+                                ),
+                                match_mode=str(args.get("match_mode") or "contains"),
+                            )
                     api_messages.append(
                         {
                             "role": "tool",
