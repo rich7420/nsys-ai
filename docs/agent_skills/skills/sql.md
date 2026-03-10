@@ -80,7 +80,7 @@ GROUP BY k.shortName ORDER BY total_ms DESC LIMIT 15
 ```sql
 SELECT DISTINCT COALESCE(n.text, s.value) AS name
 FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
-WHERE name IS NOT NULL ORDER BY name LIMIT 30
+WHERE COALESCE(n.text, s.value) IS NOT NULL ORDER BY name LIMIT 30
 ```
 
 ### NCCL time and breakdown

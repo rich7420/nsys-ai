@@ -49,7 +49,7 @@ Step 2  Discover the target name (mandatory — never guess):
         [Check NVTX first]
         SELECT DISTINCT COALESCE(n.text, s.value) AS name
         FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
-        WHERE name IS NOT NULL LIMIT 30
+        WHERE COALESCE(n.text, s.value) IS NOT NULL LIMIT 30
 
         [If no NVTX or targeting a kernel directly]
         SELECT DISTINCT s.value FROM StringIds s

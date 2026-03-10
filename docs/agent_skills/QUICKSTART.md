@@ -19,7 +19,7 @@ compute efficiency metrics, and compare runs.
 | File | Read when |
 |------|-----------|
 | `PRINCIPLES.md` | **Always, before anything.** Rules, error handling, tools. |
-| `00_INDEX.md` | Routing: which slash command or skill to load. |
+| `INDEX.md` | Routing: which slash command or skill to load. |
 
 **Never read all skill files upfront.** They are loaded on demand.
 
@@ -95,7 +95,7 @@ When a user asks "what's my MFU?":
 docs/agent_skills/
 ├── QUICKSTART.md      ← you are here
 ├── PRINCIPLES.md      ← rules + error handling + acceptance checklist
-├── 00_INDEX.md        ← routing table (loads in ~3 seconds of context)
+├── INDEX.md           ← routing table (loads in ~3 seconds of context)
 ├── commands/          ← slash command SOPs
 │   ├── analyze.md     /nsys:analyze
 │   ├── diff.md        /nsys:diff

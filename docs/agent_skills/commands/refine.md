@@ -42,7 +42,7 @@ What **tools** does the new capability require?
 
 ### Step 4: Register
 - Add to Skill File List in `PRINCIPLES.md`
-- Add routing entry in `00_INDEX.md`
+- Add routing entry in `INDEX.md`
 - If warranted, create `commands/<name>.md`
 
 ### Step 5: Verify
@@ -58,4 +58,4 @@ If adding a tool call, verify:
 - New skill follows the `SKILL_TEMPLATE.md` format
 - Acceptance Criteria section added to the new skill
 - Entry added to `PRINCIPLES.md` Skill File List
-- Entry added to `00_INDEX.md` routing table
+- Entry added to `INDEX.md` routing table

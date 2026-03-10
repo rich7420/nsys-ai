@@ -34,7 +34,15 @@ def load_skill(relative_path: str) -> str:
         File content as a string, or '' if the file cannot be read.
     """
     try:
-        path = SKILLS_DIR / relative_path
+        # Reject absolute paths and '..' to prevent path traversal
+        if relative_path.startswith("/") or ".." in relative_path.split("/"):
+            _log.debug("prompt_loader: rejected path traversal attempt: '%s'", relative_path)
+            return ""
+        path = (SKILLS_DIR / relative_path).resolve()
+        # Ensure resolved path is within SKILLS_DIR
+        if not str(path).startswith(str(SKILLS_DIR.resolve())):
+            _log.debug("prompt_loader: path escapes SKILLS_DIR: '%s'", relative_path)
+            return ""
         content = path.read_text(encoding="utf-8")
         _log.debug("prompt_loader: loaded %s (%d chars)", path, len(content))
         return content

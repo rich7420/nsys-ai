@@ -822,8 +822,9 @@ try:
         # Preserve the fallback for debugging; expose loaded version as DIFF_SYSTEM_PROMPT
         _DIFF_SYSTEM_PROMPT_FALLBACK = DIFF_SYSTEM_PROMPT
         DIFF_SYSTEM_PROMPT = _diff_md
-except Exception:
-    pass
+except (ImportError, OSError) as _exc:
+    import logging as _logging
+    _logging.getLogger(__name__).debug("diff_tools: could not load skills/diff.md: %s", _exc)
 
 
 TOOL_DESCRIPTIONS = {

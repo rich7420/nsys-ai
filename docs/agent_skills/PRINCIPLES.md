@@ -116,7 +116,7 @@ To add a new analysis capability:
 1. Create `skills/<name>.md` following the **Skill Template** in `skills/SKILL_TEMPLATE.md`
 2. Add an entry to the **Skill File List** table above
 3. Add a slash command in `commands/<name>.md` if the skill warrants a top-level entry
-4. Update `00_INDEX.md` routing table
+4. Update `INDEX.md` routing table
 
 **The skill file MUST include:**
 - A one-sentence purpose statement at the top

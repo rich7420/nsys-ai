@@ -385,7 +385,7 @@ def chat_completion(body_bytes: bytes) -> dict | None:
                     api_messages=api_messages,
                     tools=_tools_openai(),
                     query_runner=query_runner,
-                    max_turns=5,
+                    max_turns=8,
                 )
                 return {"content": content, "actions": actions}
             except Exception as e:
@@ -556,12 +556,20 @@ def stream_agent_loop(
         schema_str = None
 
     # Resolve skill_docs from the skill_names list (best-effort; silent on missing)
+    # If no skill_names provided, auto-route from user messages for consistency
+    # with the non-streaming chat_completion path.
     _skill_docs: str | None = None
-    if skill_names:
+    _effective_skills = skill_names
+    if not _effective_skills and messages:
+        try:
+            _effective_skills = _route_skill_names(messages)
+        except Exception:
+            pass
+    if _effective_skills:
         try:
             from .prompt_loader import load_skill_context
-            _skill_docs = load_skill_context(skill_names) or None
-        except Exception:
+            _skill_docs = load_skill_context(_effective_skills) or None
+        except (ImportError, OSError):
             pass
 
     if not use_diff:
@@ -1007,7 +1015,7 @@ def chat_completion_stream(body_bytes: bytes):
             ui_context=ui_context,
             tools=_tools_openai(),
             profile_path=effective_profile,
-            max_turns=5,
+            max_turns=8,
             skill_names=skill_context,
         ):
             t = ev.get("type")

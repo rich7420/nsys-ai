@@ -19,12 +19,13 @@ Step 1  Get per-iteration timing (requires NVTX iteration markers):
         ORDER BY start LIMIT 50
 
         Compute statistics:
-        SELECT MIN([end]-start)/1e6 AS min_ms,
-               MAX([end]-start)/1e6 AS max_ms,
-               AVG([end]-start)/1e6 AS avg_ms,
+        SELECT MIN(n.[end]-n.start)/1e6 AS min_ms,
+               MAX(n.[end]-n.start)/1e6 AS max_ms,
+               AVG(n.[end]-n.start)/1e6 AS avg_ms,
                COUNT(*) AS n_iters
-        FROM NVTX_EVENTS
-        WHERE COALESCE(text, '') LIKE '%sample%' OR COALESCE(text, '') LIKE '%step%'
+        FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
+        WHERE COALESCE(n.text, s.value) LIKE '%sample%'
+           OR COALESCE(n.text, s.value) LIKE '%step%'
 
         [If max_ms < 1.5 × avg_ms] → variance is normal; no problem to investigate
 

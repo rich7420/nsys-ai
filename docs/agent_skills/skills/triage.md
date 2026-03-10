@@ -43,12 +43,13 @@ Step 5  Classify the bottleneck from top kernel names:
         └────────────────────────────┴──────────────────────────────────────────────┘
 
 Step 6  [Exploration extension] Check iteration regularity if NVTX present:
-        SELECT MIN([end]-start)/1e6 AS min_ms,
-               MAX([end]-start)/1e6 AS max_ms,
-               AVG([end]-start)/1e6 AS avg_ms,
+        SELECT MIN(n.[end]-n.start)/1e6 AS min_ms,
+               MAX(n.[end]-n.start)/1e6 AS max_ms,
+               AVG(n.[end]-n.start)/1e6 AS avg_ms,
                COUNT(*) AS n_iters
-        FROM NVTX_EVENTS
-        WHERE COALESCE(text, '') LIKE '%sample%' OR COALESCE(text, '') LIKE '%step%'
+        FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
+        WHERE COALESCE(n.text, s.value) LIKE '%sample%'
+           OR COALESCE(n.text, s.value) LIKE '%step%'
         [If max_ms > 2 × avg_ms] → read skills/variance.md
 
 Step 7  Give the user a concise summary, then ask what to investigate:
