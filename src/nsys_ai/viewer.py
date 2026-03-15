@@ -5,10 +5,10 @@ Uses string.Template with HTML template files for clean separation between
 Python logic and HTML/CSS/JS presentation.
 """
 
+import html
 import json
 import os
 from string import Template
-import html
 
 from .tree import build_nvtx_tree, to_json
 
