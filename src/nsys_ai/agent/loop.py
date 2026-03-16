@@ -80,8 +80,12 @@ class Agent:
         "projection": ["speedup_estimator"],
     }
 
-    def __init__(self, profile_path: str):
-        self.path = profile_path
+    def __init__(self, profile_path: str, trim_ns: tuple[int, int] | None = None):
+        self.profile_path = profile_path
+        self._trim_kwargs: dict = {}
+        if trim_ns:
+            self._trim_kwargs["trim_start_ns"] = trim_ns[0]
+            self._trim_kwargs["trim_end_ns"] = trim_ns[1]
         self.conn = sqlite3.connect(profile_path)
 
     def close(self):
@@ -130,9 +134,9 @@ class Agent:
                 skill = get_skill(skill_name)
                 if skill is None:
                     continue
-                rows = skill.execute(self.conn)
+                rows = skill.execute(self.conn, **self._trim_kwargs)
                 evidence[skill_name] = rows
-                text = skill.run(self.conn)
+                text = skill.format_rows(rows)
                 sections.append(text)
                 sections.append("")
             except Exception as e:
@@ -180,9 +184,9 @@ class Agent:
                 skill = get_skill(skill_name)
                 if skill is None:
                     continue
-                rows = skill.execute(self.conn)
+                rows = skill.execute(self.conn, **self._trim_kwargs)
                 evidence[skill_name] = rows
-                text = skill.run(self.conn)
+                text = skill.format_rows(rows)
                 sections.append(text)
                 sections.append("")
             except Exception as e:

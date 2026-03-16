@@ -10,7 +10,6 @@ on a single stream?"
 
 from ..base import Skill, SkillParam
 
-
 SKILL = Skill(
     name="stream_concurrency",
     title="Stream Concurrency Analysis",

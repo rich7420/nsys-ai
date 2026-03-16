@@ -15,7 +15,13 @@ def _execute(conn, **kwargs):
 
     prof = Profile._from_conn(conn)
     device = int(kwargs.get("device", 0))
-    result = overlap_analysis(prof, device, trim=None)
+    # Support --trim passthrough from agent analyze
+    trim = None
+    trim_start = kwargs.get("trim_start_ns")
+    trim_end = kwargs.get("trim_end_ns")
+    if trim_start is not None and trim_end is not None:
+        trim = (int(trim_start), int(trim_end))
+    result = overlap_analysis(prof, device, trim=trim)
     if "error" in result:
         return [result]
     return [result]

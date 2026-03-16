@@ -11,7 +11,6 @@ Key metrics:
 
 from ..base import Skill, SkillParam
 
-
 SKILL = Skill(
     name="cpu_gpu_pipeline",
     title="CPU-GPU Pipeline Analysis",

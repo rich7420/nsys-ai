@@ -18,22 +18,20 @@ from ..base import Skill, SkillParam
 
 def _execute(conn, **kwargs):
     """Run all pattern matchers against the profile."""
-    device = int(kwargs.get("device", 0))
     findings = []
 
-    # Gather evidence from skills
-    from ...skills.registry import get_skill
+    # Gather evidence from skills (forward trim kwargs)
 
     # Top kernels
-    top_kernels_data = _safe_execute("top_kernels", conn)
+    top_kernels_data = _safe_execute("top_kernels", conn, **kwargs)
     # GPU idle gaps
-    idle_gaps_data = _safe_execute("gpu_idle_gaps", conn)
+    idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
     # Overlap
-    overlap_data = _safe_execute("overlap_breakdown", conn)
+    overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
     # NCCL breakdown
-    nccl_data = _safe_execute("nccl_breakdown", conn)
+    _safe_execute("nccl_breakdown", conn, **kwargs)
     # Kernel launch overhead
-    launch_data = _safe_execute("kernel_launch_overhead", conn)
+    launch_data = _safe_execute("kernel_launch_overhead", conn, **kwargs)
 
     # --- Pattern 1: GPU Bubbles (Pipeline Stalls) ---
     if idle_gaps_data:
@@ -100,9 +98,9 @@ def _execute(conn, **kwargs):
     # --- Pattern 5: Small Kernel Overhead ---
     if launch_data:
         # overhead_us > kernel_ms*1000 means overhead > kernel duration
-        high_overhead = [l for l in launch_data
-                         if l.get("kernel_ms", 0) > 0
-                         and l.get("overhead_us", 0) > l["kernel_ms"] * 1000]
+        high_overhead = [e for e in launch_data
+                         if e.get("kernel_ms", 0) > 0
+                         and e.get("overhead_us", 0) > e["kernel_ms"] * 1000]
         if len(high_overhead) >= 5:
             findings.append({
                 "pattern": "Small Kernel Overhead",
@@ -173,14 +171,14 @@ def _execute(conn, **kwargs):
     return findings
 
 
-def _safe_execute(skill_name, conn):
+def _safe_execute(skill_name, conn, **kwargs):
     """Execute a skill, returning [] on any error."""
     from ...skills.registry import get_skill
     try:
         skill = get_skill(skill_name)
         if skill is None:
             return []
-        return skill.execute(conn)
+        return skill.execute(conn, **kwargs)
     except Exception:
         return []
 

@@ -10,7 +10,6 @@ to analyze the pattern of kernel dispatches:
 
 from ..base import Skill, SkillParam
 
-
 SKILL = Skill(
     name="kernel_launch_pattern",
     title="Kernel Launch Pattern Analysis",

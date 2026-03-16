@@ -9,8 +9,7 @@ Analyzes CUDA memory copy operations to compute:
 Goes beyond the basic memory_transfers skill which only does direction aggregation.
 """
 
-from ..base import Skill, SkillParam
-
+from ..base import Skill
 
 _COPY_KIND_NAMES = {
     0: "Unknown",

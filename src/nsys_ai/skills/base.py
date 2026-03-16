@@ -104,6 +104,17 @@ def ensure_indexes(conn: sqlite3.Connection) -> None:
         index_stmts.append(
             f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_tid     ON {nvtx_table}(globalTid, start)"
         )
+        # Compound index for NVTX join queries (nvtx_layer_breakdown, nvtx_kernel_map)
+        index_stmts.append(
+            f"CREATE INDEX IF NOT EXISTS _nsysai_nvtx_range   ON {nvtx_table}(globalTid, start, [end])"
+        )
+
+    # Streamwise kernel index for window-function skills
+    # (gpu_idle_gaps, kernel_launch_pattern)
+    if kernel_table:
+        index_stmts.append(
+            f"CREATE INDEX IF NOT EXISTS _nsysai_kernel_stream ON {kernel_table}(streamId, start)"
+        )
 
     for stmt in index_stmts:
         try:
@@ -232,12 +243,15 @@ class Skill:
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-    def run(self, conn: sqlite3.Connection, **kwargs) -> str:
-        """Execute and format results as text."""
-        rows = self.execute(conn, **kwargs)
+    def format_rows(self, rows: list[dict]) -> str:
+        """Format pre-computed rows as text (no re-execution)."""
         if self.format_fn:
             return self.format_fn(rows)
         return _default_format(self, rows)
+
+    def run(self, conn: sqlite3.Connection, **kwargs) -> str:
+        """Execute and format results as text."""
+        return self.format_rows(self.execute(conn, **kwargs))
 
     def to_tool_description(self) -> str:
         """Return a one-paragraph description suitable for an LLM tool catalog."""

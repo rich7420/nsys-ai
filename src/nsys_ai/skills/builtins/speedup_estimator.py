@@ -16,7 +16,7 @@ def _execute(conn, **kwargs):
     results = []
 
     iteration_ms = float(kwargs.get("iteration_ms", 0))
-    compute_ms = float(kwargs.get("compute_ms", 0))
+    # compute_ms available via kwargs but not used in current estimates
     nccl_ms = float(kwargs.get("nccl_ms", 0))
     idle_ms = float(kwargs.get("idle_ms", 0))
     overlap_pct = float(kwargs.get("overlap_pct", 0))

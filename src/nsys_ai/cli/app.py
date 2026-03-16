@@ -756,7 +756,11 @@ def _cmd_agent(args, _profile):
     from nsys_ai.agent.loop import Agent
 
     if args.agent_action == "analyze":
-        agent = Agent(args.profile)
+        trim_ns = None
+        trim = getattr(args, "trim", None)
+        if trim:
+            trim_ns = (int(trim[0] * 1e9), int(trim[1] * 1e9))
+        agent = Agent(args.profile, trim_ns=trim_ns)
         try:
             print(agent.analyze())
             # Optionally produce evidence findings JSON
@@ -1086,6 +1090,14 @@ def _register_legacy_commands(sub):
     agent_sub = p.add_subparsers(dest="agent_action")
     sp_analyze = agent_sub.add_parser("analyze", help="Full auto-analysis report")
     sp_analyze.add_argument("profile", help="Path to .sqlite file")
+    sp_analyze.add_argument(
+        "--trim",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Time window in seconds (recommended for large profiles)",
+    )
     sp_analyze.add_argument(
         "--evidence", action="store_true", help="Also output evidence findings JSON"
     )
