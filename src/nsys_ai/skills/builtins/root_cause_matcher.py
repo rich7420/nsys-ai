@@ -66,7 +66,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                     "ensure NCCL runs on separate stream, "
                     "consider gradient compression or FSDP."
                 )
-                if overlap_pct == 0.0:
+                if overlap_pct < 0.05:
                     rec = (
                         "Overlap is EXACTLY 0.0%. NCCL is completely synchronous! "
                         "Ensure your script is not calling `torch.cuda.synchronize()` "

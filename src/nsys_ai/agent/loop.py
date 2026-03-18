@@ -162,10 +162,13 @@ class Agent:
         2. Deep Dive: Uses an LLM to select targeted skills based on the triage signals,
            executes them, and synthesizes a final response. If no LLM, falls back to keywords.
         """
-        import os
-        has_llm = bool(os.environ.get("GEMINI_API_KEY") or
-                       os.environ.get("OPENAI_API_KEY") or
-                       os.environ.get("ANTHROPIC_API_KEY"))
+        # Use shared chat configuration to determine if an LLM is available
+        try:
+            from ..chat_config import _get_model_and_key
+            model, api_key = _get_model_and_key()
+        except Exception:
+            model, api_key = None, None
+        has_llm = bool(model and api_key)
 
         sections = [f"Question: {question}\n"]
         evidence = {}
@@ -231,7 +234,6 @@ class Agent:
     def _try_llm_triage(self, question: str, triage_results: list[dict]) -> list[str]:
         """Use LLM to select the next set of skills based on the triage findings."""
         import json
-        import os
 
         from ..skills.registry import list_skills
 
@@ -250,13 +252,9 @@ class Agent:
 
         try:
             import litellm
-            model = None
-            if os.environ.get("GEMINI_API_KEY"):
-                model = "gemini/gemini-2.5-flash"
-            elif os.environ.get("OPENAI_API_KEY"):
-                model = "gpt-4o-mini"
-            elif os.environ.get("ANTHROPIC_API_KEY"):
-                model = "claude-sonnet-4-20250514"
+            from ..chat_config import _get_model_and_key
+
+            model, _ = _get_model_and_key()
 
             if model:
                 resp = litellm.completion(
