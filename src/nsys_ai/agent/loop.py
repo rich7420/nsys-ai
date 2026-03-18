@@ -252,6 +252,7 @@ class Agent:
 
         try:
             import litellm
+
             from ..chat_config import _get_model_and_key
 
             model, _ = _get_model_and_key()
