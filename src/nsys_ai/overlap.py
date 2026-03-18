@@ -296,6 +296,7 @@ def detect_iterations(
         results.append(
             {
                 "iteration": i,
+                "text": it.get("text", ""),
                 "gpu_start_s": round(gpu_start / 1e9, 4),
                 "gpu_end_s": round(gpu_end / 1e9, 4),
                 "duration_ms": round((gpu_end - gpu_start) / 1e6, 2),

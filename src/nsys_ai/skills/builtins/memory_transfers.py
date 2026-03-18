@@ -87,16 +87,29 @@ ORDER BY 1""",
 
 # Replace the direct SQL with a safe execute_fn for the module
 def _execute_h2d_dist(conn, **kwargs):
-    # Temporarily remove execute_fn to use the base SQL machinery
-    fn = H2D_DIST_SKILL.execute_fn
-    H2D_DIST_SKILL.execute_fn = None
+    """Execute the H2D distribution query, returning an empty result if the
+    underlying memcpy table does not exist.
+
+    This implementation avoids mutating the global H2D_DIST_SKILL instance and
+    instead uses a temporary Skill instance to force the SQL execution path.
+    """
+    import sqlite3
+
+    # Create a temporary Skill that uses the same SQL and formatting but no custom execute_fn
+    temp_skill = Skill(
+        name=H2D_DIST_SKILL.name,
+        title=H2D_DIST_SKILL.title,
+        description=H2D_DIST_SKILL.description,
+        category=H2D_DIST_SKILL.category,
+        sql=H2D_DIST_SKILL.sql,
+        format_fn=H2D_DIST_SKILL.format_fn,
+        tags=getattr(H2D_DIST_SKILL, "tags", None),
+    )
     try:
-        res = H2D_DIST_SKILL.execute(conn, **kwargs)
-    except Exception:
-        res = []
-    finally:
-        H2D_DIST_SKILL.execute_fn = fn
-    return res
+        return temp_skill.execute(conn, **kwargs)
+    except sqlite3.OperationalError:
+        # Missing memcpy table — treat as "no H2D transfers"
+        return []
 
 H2D_DIST_SKILL.execute_fn = _execute_h2d_dist
 
