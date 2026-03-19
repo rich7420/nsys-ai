@@ -70,9 +70,9 @@ H2D_DIST_SKILL = Skill(
     category="memory",
     sql="""\
 WITH baseline AS (
-    SELECT MIN(start) AS min_start
-    FROM {memcpy_table}
-    WHERE copyKind = 1 {trim_clause}
+    SELECT MIN(k.start) AS min_start
+    FROM {memcpy_table} k
+    WHERE k.copyKind = 1 {trim_clause}
 )
 SELECT
     CAST((k.start - b.min_start) / 1000000000.0 AS INT) AS second,
