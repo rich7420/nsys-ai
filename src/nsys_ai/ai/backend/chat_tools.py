@@ -418,15 +418,24 @@ def _load_prompt_files() -> tuple[str | None, str | None]:
         the corresponding file could not be read.
     """
     prompts_dir = Path(__file__).resolve().parent.parent.parent / "prompts"
+    chat_system: str | None = None
+    mfu_ref: str | None = None
+
+    # Load each file independently so a failure in one doesn't drop the other.
     try:
         chat_system = (prompts_dir / "chat_system.txt").read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        logger.warning("chat_system.txt not found in %s: %s", prompts_dir, exc)
+    except OSError as exc:
+        logger.error("Error reading chat_system.txt from %s: %s", prompts_dir, exc)
+
+    try:
         mfu_ref = (prompts_dir / "mfu_reference.txt").read_text(encoding="utf-8")
     except FileNotFoundError as exc:
-        logger.error("Prompt files not found in %s: %s", prompts_dir, exc)
-        return (None, None)
+        logger.warning("mfu_reference.txt not found in %s: %s", prompts_dir, exc)
     except OSError as exc:
-        logger.error("Error reading prompt files from %s: %s", prompts_dir, exc)
-        return (None, None)
+        logger.error("Error reading mfu_reference.txt from %s: %s", prompts_dir, exc)
+
     return (chat_system, mfu_ref)
 
 

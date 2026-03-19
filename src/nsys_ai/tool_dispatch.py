@@ -92,6 +92,11 @@ class ToolDispatcher:
             self._register_profile_tools()
         elif mode == "diff":
             self._register_diff_tools()
+        else:
+            raise ValueError(
+                f"Unsupported ToolDispatcher mode: {mode!r}. "
+                "Expected 'profile' or 'diff'."
+            )
 
     def _register_profile_tools(self) -> None:
         """Register all single-profile tool handlers."""
@@ -454,12 +459,14 @@ class ToolDispatcher:
         events = [{"type": "system", "content": "Getting region diff..."}]
         if not self._diff_context:
             return ToolResult(content="No diff context.", events=events)
-        nvtx = args.get("nvtx_exact_match", "")
-        if isinstance(nvtx, list):
-            nvtx = nvtx[0] if nvtx else ""
+        nvtx = args.get("nvtx_exact_match")
+        if nvtx is None:
+            nvtx = ""
         res = get_region_diff(
-            self._diff_context, nvtx, args.get("iteration_index"),
-            args.get("marker"), args.get("target_gpu", 0),
+            self._diff_context,
+            nvtx,
+            args.get("iteration_index"),
+            args.get("target_gpu", 0),
         )
         return ToolResult(content=json.dumps(res), events=events)
 
