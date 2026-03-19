@@ -12,9 +12,14 @@ It does NOT make any LLM API calls (those live in chat.py).
 
 from __future__ import annotations
 
+import functools
 import json
+import logging
+from pathlib import Path
 
 from .profile_db_tool import TOOL_QUERY_PROFILE_DB
+
+logger = logging.getLogger(__name__)
 
 # Pure MFU tool: one step_time_s per call. Same tool in single-profile and diff; diff compares by calling twice.
 TOOL_COMPUTE_MFU = {
@@ -404,6 +409,27 @@ def _tools_openai() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=1)
+def _load_prompt_files() -> tuple[str | None, str | None]:
+    """Load chat_system and MFU reference prompt files once, with caching.
+
+    Returns:
+        A tuple ``(chat_system, mfu_ref)`` where each element may be ``None`` if
+        the corresponding file could not be read.
+    """
+    prompts_dir = Path(__file__).resolve().parent.parent.parent / "prompts"
+    try:
+        chat_system = (prompts_dir / "chat_system.txt").read_text(encoding="utf-8")
+        mfu_ref = (prompts_dir / "mfu_reference.txt").read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        logger.error("Prompt files not found in %s: %s", prompts_dir, exc)
+        return (None, None)
+    except OSError as exc:
+        logger.error("Error reading prompt files from %s: %s", prompts_dir, exc)
+        return (None, None)
+    return (chat_system, mfu_ref)
+
+
 def _build_system_prompt(
     ui_context: dict,
     profile_schema: str | None = None,
@@ -431,16 +457,29 @@ def _build_system_prompt(
             "use || for concatenation not CONCAT()).\n"
             "=====================================================\n\n"
         )
-    from pathlib import Path
+    chat_system, mfu_ref = _load_prompt_files()
 
-    prompts_dir = Path(__file__).resolve().parent.parent.parent / "prompts"
-    chat_system = (prompts_dir / "chat_system.txt").read_text(encoding="utf-8")
-    mfu_ref = (prompts_dir / "mfu_reference.txt").read_text(encoding="utf-8")
+    if chat_system is not None:
+        # Use the template from the prompt file when available.
+        chat_system = chat_system.replace("{schema_block}", schema_block)
+        chat_system = chat_system.replace("{ctx_json}", ctx_json)
+        base_prompt = chat_system
+    else:
+        # Fallback minimal prompt if the prompt files could not be loaded.
+        logger.warning("Using fallback system prompt because prompt files could not be loaded.")
+        base_prompt = (
+            "You are an AI assistant helping users analyze performance profiles and MFU.\n"
+            "Respond with clear, concise, and technically accurate guidance.\n"
+            f"{schema_block}"
+            "=== UI CONTEXT (JSON) ===\n"
+            f"{ctx_json}\n"
+            "=====================================================\n"
+        )
 
-    chat_system = chat_system.replace("{schema_block}", schema_block)
-    chat_system = chat_system.replace("{ctx_json}", ctx_json)
+    parts: list[str] = [base_prompt]
+    if mfu_ref:
+        parts.append(mfu_ref)
 
-    parts = [chat_system, mfu_ref]
     if skill_docs:
         parts.append(f"\n=== SESSION SKILL CONTEXT ===\n{skill_docs}\n=== END SESSION SKILL CONTEXT ===\n")
 

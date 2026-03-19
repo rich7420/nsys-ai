@@ -20,6 +20,7 @@ Tool catalog:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -797,7 +798,27 @@ def get_memory_profile_diff(
 # ── Phase C system prompt and tool metadata for agent integration ─────────────
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
-DIFF_SYSTEM_PROMPT = (_PROMPTS_DIR / "diff_system.txt").read_text(encoding="utf-8")
+
+def _load_diff_system_prompt() -> str:
+    """Load the diff system prompt, falling back to a minimal prompt if file is missing."""
+    _fallback = (
+        "You are a performance analysis assistant for Nsight Systems profile diffs. "
+        "Provide concise, technically accurate analysis based solely on the supplied tool outputs."
+    )
+    prompt_path = _PROMPTS_DIR / "diff_system.txt"
+    try:
+        return prompt_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        _log_dt = logging.getLogger(__name__)
+        _log_dt.warning("diff_tools: diff_system.txt not found at %s; using minimal fallback prompt", prompt_path)
+        return _fallback
+    except OSError as _exc:
+        _log_dt = logging.getLogger(__name__)
+        _log_dt.warning("diff_tools: could not read diff_system.txt at %s: %s; using minimal fallback prompt", prompt_path, _exc)
+        return _fallback
+
+
+DIFF_SYSTEM_PROMPT = _load_diff_system_prompt()
 
 # Dynamic override: load skills/diff.md when available (falls back to hardcoded prompt).
 try:
@@ -1062,7 +1083,12 @@ def run_diff_tool(ctx: DiffContext, name: str, arguments: dict) -> dict:
     args_str = json.dumps(arguments) if arguments else "{}"
     from .tool_dispatch import ToolDispatcher
     dispatcher = ToolDispatcher(mode="diff", diff_context=ctx)
-    res = dispatcher.dispatch(name, args_str)
+    try:
+        res = dispatcher.dispatch(name, args_str)
+    except (TypeError, ValueError, KeyError) as e:
+        return {"error": "invalid_arguments", "message": str(e)}
+    except Exception as e:
+        return {"error": "internal_error", "message": "Tool execution failed", "detail": str(e)}
     try:
         j = json.loads(res.content)
         return j if isinstance(j, dict) else {"result": j}
