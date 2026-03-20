@@ -8,7 +8,7 @@ Enhanced with:
 import logging
 import sqlite3
 
-from ..base import Skill, SkillParam, _resolve_activity_tables, ensure_indexes
+from ..base import Skill, SkillParam, _resolve_activity_tables
 
 _log = logging.getLogger(__name__)
 
