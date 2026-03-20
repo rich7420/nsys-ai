@@ -200,8 +200,23 @@ LIMIT ?"""
         # Compute total idle stats for note enrichment
         total_idle_ns = sum(r["gap_ns"] for r in rows)
         profile_span = self.trim[1] - self.trim[0]
-        # Normalize by number of active streams so percentage is not misleading on multi-stream workloads
-        active_streams = len({r["streamId"] for r in rows}) or 1
+        # Normalize by number of active streams so percentage is not misleading
+        # on multi-stream workloads.  Query the kernel table directly instead of
+        # deriving from the limited top-N rows (which would undercount streams).
+        try:
+            with self.prof._lock:
+                active_streams_row = self.prof.conn.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT k.streamId) AS n
+                    FROM {self.prof.schema.kernel_table} k
+                    WHERE k.deviceId = ? AND k.[end] >= ? AND k.start <= ?
+                    """,
+                    (self.device, self.trim[0], self.trim[1]),
+                ).fetchone()
+            active_streams = (active_streams_row["n"] or 0) if active_streams_row else 0
+            active_streams = active_streams or 1
+        except Exception:
+            active_streams = 1
         pct = (
             round(100 * total_idle_ns / (profile_span * active_streams), 1)
             if profile_span > 0

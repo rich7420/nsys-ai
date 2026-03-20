@@ -41,7 +41,8 @@ def _execute(conn: sqlite3.Connection, **kwargs):
         # Extract summary from enriched gpu_idle_gaps output
         gap_summary = next((g for g in idle_gaps_data if g.get("_summary")), None)
         gap_rows = [g for g in idle_gaps_data if not g.get("_summary")]
-        large_gaps = [g for g in gap_rows if g.get("gap_ns", 0) > 1_000_000]
+        gap_threshold = int(kwargs.get("min_gap_ns", 1_000_000))
+        large_gaps = [g for g in gap_rows if g.get("gap_ns", 0) > gap_threshold]
         if len(large_gaps) >= 3:
             total_idle_ms = (
                 gap_summary.get("total_idle_ms", 0)
@@ -85,7 +86,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             )
 
             evidence = (
-                f"{len(large_gaps)} gaps > 1ms detected, "
+                f"{len(large_gaps)} gaps > {gap_threshold / 1e6:.0f}ms detected, "
                 f"totaling {total_idle_ms:.1f}ms of idle time"
             )
             if pct > 0:

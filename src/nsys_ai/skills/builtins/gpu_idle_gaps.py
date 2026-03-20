@@ -116,13 +116,13 @@ WITH ordered AS (
 )
 SELECT COUNT(*) AS gap_count,
        SUM(start - prev_end) AS total_gap_ns,
-       SUM(CASE WHEN (start - prev_end) BETWEEN ? AND 5000000 THEN 1 ELSE 0 END) AS gaps_1_5ms,
+       SUM(CASE WHEN (start - prev_end) BETWEEN 1000000 AND 5000000 THEN 1 ELSE 0 END) AS gaps_1_5ms,
        SUM(CASE WHEN (start - prev_end) BETWEEN 5000001 AND 50000000 THEN 1 ELSE 0 END) AS gaps_5_50ms,
        SUM(CASE WHEN (start - prev_end) > 50000000 THEN 1 ELSE 0 END) AS gaps_gt50ms
 FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     try:
-        agg = dict(conn.execute(agg_sql, trim_params + [min_gap_ns, min_gap_ns]).fetchone())
+        agg = dict(conn.execute(agg_sql, trim_params + [min_gap_ns]).fetchone())
     except sqlite3.OperationalError:
         agg = {}
 
@@ -131,12 +131,12 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     # the number of active streams to avoid pct > 100%.
     try:
         time_range = conn.execute(
-            f"SELECT MIN(start), MAX([end]) FROM {kernel_tbl} WHERE deviceId = ? {trim_clause}",
-            trim_params
+            f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
+            trim_params,
         ).fetchone()
         profile_span_ns = (time_range[1] or 0) - (time_range[0] or 0)
         stream_count_row = conn.execute(
-            f"SELECT COUNT(DISTINCT streamId) AS n FROM {kernel_tbl} WHERE deviceId = ? {trim_clause}",
+            f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}",
             trim_params,
         ).fetchone()
         n_streams = stream_count_row["n"] if stream_count_row else 1
