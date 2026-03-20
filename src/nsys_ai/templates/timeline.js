@@ -16,6 +16,8 @@ class TileCache {
         this.maxBytes = maxBytes;
         this.currentBytes = 0;
         this.nvtxReady = new Set();
+        this._dirty = true;
+        this._cachedMerge = null;
     }
     key(startS, endS) { return `${startS.toFixed(1)}-${endS.toFixed(1)}`; }
     has(startS, endS) { return this.tiles.has(this.key(startS, endS)); }
@@ -34,6 +36,7 @@ class TileCache {
         // No eviction — tiles are small with pre-built server cache
         this.tiles.set(k, { data, ts: Date.now(), sizeEst });
         this.currentBytes += sizeEst;
+        this._dirty = true;
     }
     mergeNvtx(startS, endS, nvtxData, gpuId) {
         const k = this.key(startS, endS);
@@ -49,10 +52,12 @@ class TileCache {
         }
         if (mergedTargetGpu) {
             this.markNvtx(startS, endS, gpuId);
+            this._dirty = true;
         }
     }
-    // Get all cached data merged
+    // Get all cached data merged (with dirty-flag to skip redundant rebuilds)
     allData() {
+        if (!this._dirty && this._cachedMerge) return this._cachedMerge;
         const merged = { gpus: [] };
         const gpuMap = {};
         for (const [, entry] of this.tiles) {
@@ -106,6 +111,8 @@ class TileCache {
                 return true;
             });
         }
+        this._cachedMerge = merged;
+        this._dirty = false;
         return merged;
     }
 }
@@ -774,9 +781,9 @@ function kernelColorFromName(name) {
 
     // Check if we already computed a color for this normalized name
     if (_normalizedColorMap.has(norm)) {
-        const color = _normalizedColorMap.get(norm);
-        _kernelColorCache.set(name, color);
-        return color;
+        const entry = _normalizedColorMap.get(norm);
+        _kernelColorCache.set(name, entry);
+        return entry;
     }
 
     const h = _djb2(norm);
@@ -785,10 +792,11 @@ function kernelColorFromName(name) {
     const sat = 70;  // Perfetto uses 80, we go slightly less for dark bg
     const lit = Math.round(_perceptualLightness(hue));
     const color = `hsl(${hue}, ${sat}%, ${lit}%)`;
+    const entry = { color, lightness: lit };
 
-    _normalizedColorMap.set(norm, color);
-    _kernelColorCache.set(name, color);
-    return color;
+    _normalizedColorMap.set(norm, entry);
+    _kernelColorCache.set(name, entry);
+    return entry;
 }
 
 // ── Formatting ──
@@ -1218,14 +1226,20 @@ function drawStreams(W, H) {
             const isNcclK = k.name.toLowerCase().includes('nccl');
 
             // Per-kernel color from name hash (NCCL keeps special purple)
-            let fillColor = isNcclK ? '#d2a8ff' : kernelColorFromName(k.name);
+            const kColor = isNcclK ? null : kernelColorFromName(k.name);
+            let fillColor = isNcclK ? '#d2a8ff' : kColor.color;
+            let kLightness = isNcclK ? 72 : kColor.lightness;  // #d2a8ff ≈ L72
             let alpha = 0.78 + 0.22 * (k.heat || 0);
-            // Density-aware: stronger alpha reduction for small/dense blocks
-            // 1px → 0.15α, 3px → 0.5α, 6px+ → full brightness
-            if (w < 6) alpha *= Math.max(0.15, w / 6);
-            if (searchQuery && !isMatch) alpha = renderSettings.kernelSearchNonMatchAlpha;
-            if (selectedNvtx && !isSel) alpha = renderSettings.kernelWhenNvtxSelectedAlpha;
-            if (isSel) { fillColor = '#79b8ff'; alpha = 1; }
+            // Apply dim overrides (search/NVTX) OR density reduction, not both
+            if (searchQuery && !isMatch) {
+                alpha = renderSettings.kernelSearchNonMatchAlpha;
+            } else if (selectedNvtx && !isSel) {
+                alpha = renderSettings.kernelWhenNvtxSelectedAlpha;
+            } else if (w < 6) {
+                // Density-aware: 1px → 0.25α, 3px → 0.5α, 6px+ → full
+                alpha *= Math.max(0.25, w / 6);
+            }
+            if (isSel) { fillColor = '#79b8ff'; kLightness = 60; alpha = 1; }
 
             ctx.globalAlpha = alpha;
             ctx.fillStyle = fillColor;
@@ -1246,11 +1260,11 @@ function drawStreams(W, H) {
                 ctx.lineWidth = 1;
             }
 
-            // Kernel name label
+            // Kernel name label (dynamic contrast: dark text on light bars, white on dark)
             if (w > 20) {
                 ctx.fillStyle = isSel
                     ? '#fff'
-                    : (searchQuery && !isMatch ? '#555' : '#1c1c1c');
+                    : (searchQuery && !isMatch ? '#555' : (kLightness > 55 ? '#1c1c1c' : '#e6edf3'));
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
                 ctx.save();
