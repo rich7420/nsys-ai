@@ -16,6 +16,8 @@ class TileCache {
         this.maxBytes = maxBytes;
         this.currentBytes = 0;
         this.nvtxReady = new Set();
+        this._dirty = true;
+        this._cachedMerge = null;
     }
     key(startS, endS) { return `${startS.toFixed(1)}-${endS.toFixed(1)}`; }
     has(startS, endS) { return this.tiles.has(this.key(startS, endS)); }
@@ -34,6 +36,7 @@ class TileCache {
         // No eviction — tiles are small with pre-built server cache
         this.tiles.set(k, { data, ts: Date.now(), sizeEst });
         this.currentBytes += sizeEst;
+        this._dirty = true;
     }
     mergeNvtx(startS, endS, nvtxData, gpuId) {
         const k = this.key(startS, endS);
@@ -49,10 +52,12 @@ class TileCache {
         }
         if (mergedTargetGpu) {
             this.markNvtx(startS, endS, gpuId);
+            this._dirty = true;
         }
     }
-    // Get all cached data merged
+    // Get all cached data merged (with dirty-flag to skip redundant rebuilds)
     allData() {
+        if (!this._dirty && this._cachedMerge) return this._cachedMerge;
         const merged = { gpus: [] };
         const gpuMap = {};
         for (const [, entry] of this.tiles) {
@@ -106,6 +111,8 @@ class TileCache {
                 return true;
             });
         }
+        this._cachedMerge = merged;
+        this._dirty = false;
         return merged;
     }
 }
@@ -358,13 +365,33 @@ function rebuildDataFromCache() {
     }
     Object.values(streamMap).forEach(ks => ks.sort((a, b) => a.start_ns - b.start_ns));
 
-    // Time bounds
-    timeStart = kernels.length ? Math.min(...kernels.map(k => k.start_ns), ...nvtxSpans.map(s => s.start)) : 0;
-    timeEnd = kernels.length ? Math.max(...kernels.map(k => k.end_ns), ...nvtxSpans.map(s => s.end)) : 1;
+    // Time bounds (use explicit loops instead of spread to avoid RangeError on large arrays)
+    if (kernels.length || nvtxSpans.length) {
+        timeStart = Infinity; timeEnd = -Infinity;
+        for (let i = 0; i < kernels.length; i++) {
+            if (kernels[i].start_ns < timeStart) timeStart = kernels[i].start_ns;
+            if (kernels[i].end_ns > timeEnd) timeEnd = kernels[i].end_ns;
+        }
+        for (let i = 0; i < nvtxSpans.length; i++) {
+            if (nvtxSpans[i].start < timeStart) timeStart = nvtxSpans[i].start;
+            if (nvtxSpans[i].end > timeEnd) timeEnd = nvtxSpans[i].end;
+        }
+        if (!Number.isFinite(timeStart)) timeStart = 0;
+        if (!Number.isFinite(timeEnd)) timeEnd = 1;
+    } else {
+        timeStart = 0; timeEnd = 1;
+    }
     timeSpan = Math.max(timeEnd - timeStart, 1);
 
-    // NVTX depth
-    nvtxMaxDepth = nvtxSpans.length ? Math.min(6, Math.max(...nvtxSpans.map(s => s.depth)) + 1) : 0;
+    // NVTX depth (use loop to avoid spread on large arrays)
+    nvtxMaxDepth = 0;
+    if (nvtxSpans.length) {
+        let maxD = 0;
+        for (let i = 0; i < nvtxSpans.length; i++) {
+            if (nvtxSpans[i].depth > maxD) maxD = nvtxSpans[i].depth;
+        }
+        nvtxMaxDepth = Math.min(6, maxD + 1);
+    }
     nvtxDepthByGpu = new Map();
     for (const s of nvtxSpans) {
         const gpu = s.gpu;
@@ -712,6 +739,65 @@ const GPU_SEP_COLORS = ['#58a6ff', '#bc8cff', '#3fb950', '#ff7b7b'];
 
 function streamColor(idx) { return STREAM_COLORS[idx % STREAM_COLORS.length]; }
 function nvtxColor(depth) { return NVTX_COLORS[depth % NVTX_COLORS.length]; }
+
+// Per-kernel coloring: Perfetto-inspired hash → perceptually-uniform HSL
+// Normalizes name (strip templates, pointers, numeric suffixes) so similar
+// kernels get similar colors. Uses golden-angle hue distribution and
+// per-hue-band lightness correction to approximate HSLuv.
+const _kernelColorCache = new Map();
+const _normalizedColorMap = new Map();  // normalized name → color
+
+function _normalizeKernelName(name) {
+    return name
+        .replace(/<[^>]*>/g, '')           // strip template args
+        .replace(/0x[0-9a-f]+/gi, '')      // strip hex pointers
+        .replace(/(_)?\d+$/g, '')          // strip numeric suffixes at end of name
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function _djb2(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    return h;
+}
+
+// Approximate HSLuv: adjust lightness per hue band so colors look equally bright
+function _perceptualLightness(hue) {
+    // Yellow-green (50-110°) appears brightest in HSL → lower lightness
+    // Blue-purple (210-290°) appears darkest → higher lightness
+    if (hue >= 50 && hue < 110) return 48 + ((hue - 50) / 60) * 4;    // 48-52%
+    if (hue >= 110 && hue < 170) return 52 + ((hue - 110) / 60) * 6;  // 52-58%
+    if (hue >= 170 && hue < 210) return 58;                             // 58%
+    if (hue >= 210 && hue < 290) return 58 + ((hue - 210) / 80) * 10;  // 58-68%
+    if (hue >= 290 && hue < 340) return 62 + ((hue - 290) / 50) * 4;   // 62-66%
+    return 56;  // reds (340-360, 0-50)
+}
+
+function kernelColorFromName(name) {
+    if (_kernelColorCache.has(name)) return _kernelColorCache.get(name);
+
+    const norm = _normalizeKernelName(name);
+
+    // Check if we already computed a color for this normalized name
+    if (_normalizedColorMap.has(norm)) {
+        const entry = _normalizedColorMap.get(norm);
+        _kernelColorCache.set(name, entry);
+        return entry;
+    }
+
+    const h = _djb2(norm);
+    // Golden-angle distribution for better hue spread
+    const hue = Math.round((h * 137.508) % 360);
+    const sat = 70;  // Perfetto uses 80, we go slightly less for dark bg
+    const lit = Math.round(_perceptualLightness(hue));
+    const color = `hsl(${hue}, ${sat}%, ${lit}%)`;
+    const entry = { color, lightness: lit };
+
+    _normalizedColorMap.set(norm, entry);
+    _kernelColorCache.set(name, entry);
+    return entry;
+}
 
 // ── Formatting ──
 function fmtDur(ms) { return ms >= 1 ? ms.toFixed(2) + 'ms' : (ms * 1000).toFixed(0) + 'μs'; }
@@ -1139,12 +1225,32 @@ function drawStreams(W, H) {
             const isSel = k === selectedKernel;
             const isNcclK = k.name.toLowerCase().includes('nccl');
 
-            // Color (higher base alpha so blocks are clearly visible on dark bg)
-            let fillColor = isNcclK ? '#d2a8ff' : color;
+            // Per-kernel color from name hash (NCCL keeps special purple).
+            // Cache the resolved {color, lightness} on the kernel object so we
+            // don't recompute it on every redraw inside the hot render loop.
+            if (!k._nsysColor) {
+                if (isNcclK) {
+                    // #d2a8ff ≈ L72
+                    k._nsysColor = { color: '#d2a8ff', lightness: 72 };
+                } else {
+                    k._nsysColor = kernelColorFromName(k.name);
+                }
+            }
+
+            const kColor = k._nsysColor;
+            let fillColor = kColor.color;
+            let kLightness = kColor.lightness;
             let alpha = 0.78 + 0.22 * (k.heat || 0);
-            if (searchQuery && !isMatch) alpha = renderSettings.kernelSearchNonMatchAlpha;
-            if (selectedNvtx && !isSel) alpha = renderSettings.kernelWhenNvtxSelectedAlpha;
-            if (isSel) { fillColor = '#79b8ff'; alpha = 1; }
+            // Apply dim overrides (search/NVTX) OR density reduction, not both
+            if (searchQuery && !isMatch) {
+                alpha = renderSettings.kernelSearchNonMatchAlpha;
+            } else if (selectedNvtx && !isSel) {
+                alpha = renderSettings.kernelWhenNvtxSelectedAlpha;
+            } else if (w < 6) {
+                // Density-aware: 1px → 0.25α, 3px → 0.5α, 6px+ → full
+                alpha *= Math.max(0.25, w / 6);
+            }
+            if (isSel) { fillColor = '#79b8ff'; kLightness = 60; alpha = 1; }
 
             ctx.globalAlpha = alpha;
             ctx.fillStyle = fillColor;
@@ -1165,11 +1271,11 @@ function drawStreams(W, H) {
                 ctx.lineWidth = 1;
             }
 
-            // Kernel name label
+            // Kernel name label (dynamic contrast: dark text on light bars, white on dark)
             if (w > 20) {
                 ctx.fillStyle = isSel
                     ? '#fff'
-                    : (searchQuery && !isMatch ? '#555' : '#1c1c1c');
+                    : (searchQuery && !isMatch ? '#555' : (kLightness > 55 ? '#1c1c1c' : '#e6edf3'));
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
                 ctx.save();
@@ -1854,17 +1960,45 @@ function toggleHelp() {
     h.style.display = h.style.display === 'none' ? 'block' : 'none';
 }
 
-// ── Search ──
+// ── Search (supports regex: wrap in /pattern/flags, e.g. /nccl.*allreduce/i) ──
 function onSearch() {
-    searchQuery = document.getElementById('searchInput').value.trim().toLowerCase();
+    const raw = document.getElementById('searchInput').value.trim();
     searchKernelMatches = new Set();
     searchNvtxMatches = new Set();
-    if (searchQuery) {
-        kernels.forEach(k => { if (k.name.toLowerCase().includes(searchQuery)) searchKernelMatches.add(k); });
+    searchQuery = raw;
+    let matcher = null;
+    let isRegex = false;
+
+    // Detect regex: /pattern/ or /pattern/flags
+    if (raw.length >= 2 && raw.startsWith('/') && raw.lastIndexOf('/') > 0) {
+        const lastSlash = raw.lastIndexOf('/');
+        const pattern = raw.slice(1, lastSlash);
+        const flags = (raw.slice(lastSlash + 1) || 'i').replace(/[gy]/g, '');
+        if (pattern) {
+            try {
+                matcher = new RegExp(pattern, flags);
+                isRegex = true;
+            } catch (e) {
+                searchQuery = '';
+                document.getElementById('searchHint').textContent = 'invalid regex';
+                draw();
+                return;
+            }
+        }
+    }
+    // Fallback: substring match
+    if (!matcher && raw) {
+        const q = raw.toLowerCase();
+        matcher = { test: (s) => s.toLowerCase().includes(q) };
+    }
+    if (matcher) {
+        kernels.forEach(k => { if (matcher.test(k.name)) searchKernelMatches.add(k); });
         nvtxSpans.forEach(s => {
-            if ((s.name || '').toLowerCase().includes(searchQuery)) searchNvtxMatches.add(nvtxKey(s));
+            if (matcher.test(s.name || '')) searchNvtxMatches.add(nvtxKey(s));
         });
-        document.getElementById('searchHint').textContent = `${searchKernelMatches.size} kernels, ${searchNvtxMatches.size} NVTX`;
+        const modeLabel = isRegex ? ' (regex)' : '';
+        document.getElementById('searchHint').textContent =
+            `${searchKernelMatches.size} kernels, ${searchNvtxMatches.size} NVTX${modeLabel}`;
     } else {
         document.getElementById('searchHint').textContent = '';
     }
