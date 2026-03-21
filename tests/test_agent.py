@@ -1,6 +1,5 @@
 """Tests for the agent persona and loop."""
 
-import sqlite3
 
 
 def test_agent_identity():

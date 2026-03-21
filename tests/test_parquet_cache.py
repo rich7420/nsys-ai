@@ -3,8 +3,6 @@
 import json
 import os
 
-import pytest
-
 from nsys_ai import parquet_cache
 
 

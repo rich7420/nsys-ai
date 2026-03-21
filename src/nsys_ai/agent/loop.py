@@ -7,8 +7,6 @@ and produces a structured analysis report. Works without LLM by default
 extra installed, can delegate to an LLM for natural language analysis.
 """
 
-import sqlite3
-import duckdb
 
 from ..profile import Profile
 from ..skills.registry import get_skill, run_skill

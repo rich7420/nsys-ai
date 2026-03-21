@@ -308,7 +308,7 @@ def attribute_kernels_to_nvtx(
             if trim:
                 trim_sql = "WHERE k_start >= ? AND k_end <= ?"
                 params = [trim[0], trim[1]]
-            
+
             cur = conn.execute(f"SELECT * FROM nvtx_kernel_map {trim_sql} ORDER BY k_start", params)
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]

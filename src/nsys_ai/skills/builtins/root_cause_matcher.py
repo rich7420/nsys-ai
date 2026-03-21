@@ -16,6 +16,8 @@ to gather evidence, then matches against known patterns.
 import logging
 import sqlite3
 
+from nsys_ai.sql_compat import sqlite_to_duckdb
+
 from ..base import Skill, SkillParam, _resolve_activity_tables
 
 _log = logging.getLogger(__name__)

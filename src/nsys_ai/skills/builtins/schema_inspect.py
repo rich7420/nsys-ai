@@ -2,17 +2,18 @@
 
 from ..base import Skill
 
+
 def _execute(conn, **kwargs):
     import duckdb
     if isinstance(conn, duckdb.DuckDBPyConnection):
         cur = conn.execute(
             """
-            SELECT table_name, 
-                   column_name, 
-                   data_type AS column_type, 
-                   0 AS is_pk 
-            FROM information_schema.columns 
-            WHERE table_schema='main' 
+            SELECT table_name,
+                   column_name,
+                   data_type AS column_type,
+                   0 AS is_pk
+            FROM information_schema.columns
+            WHERE table_schema='main'
                OR table_schema='src'
             ORDER BY table_name, ordinal_position
             """

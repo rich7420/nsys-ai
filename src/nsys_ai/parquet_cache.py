@@ -108,7 +108,7 @@ def build_cache(sqlite_path: str) -> Path:
     cache_dir = _cache_dir_for(sqlite_path)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Building analysis cache (first run only)...", file=sys.stderr, flush=True)
+    print("Building analysis cache (first run only)...", file=sys.stderr, flush=True)
     t0 = time.monotonic()
 
     db = duckdb.connect()

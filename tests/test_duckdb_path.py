@@ -9,10 +9,8 @@ that accidentally touches ``self.conn`` will crash here — which is the point.
 import threading
 
 import duckdb
-import pytest
 
 from nsys_ai.sql_compat import sqlite_to_duckdb
-
 
 # ---------------------------------------------------------------------------
 # Minimal Profile stub that only supports _duckdb_query (DuckDB path).

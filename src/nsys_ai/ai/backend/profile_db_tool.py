@@ -10,6 +10,10 @@ import logging
 import re
 import sqlite3
 import threading
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import duckdb
 
 _log = logging.getLogger(__name__)
 
@@ -112,7 +116,7 @@ def query_profile_db(
 
     # DuckDB translation for LLM-generated SQL
     q = sqlite_to_duckdb(q)
-    
+
     # Rewrite sqlite_master to SHOW TABLES (LLMs love sqlite_master)
     if "sqlite_master" in q.lower():
         q = "SHOW TABLES"
@@ -121,11 +125,11 @@ def query_profile_db(
         cur = conn.execute(q)
         # duckdb cursor fetchall returns list of tuples
         rows = cur.fetchall()
-        
+
         # Determine column names (works for both duckdb and sqlite)
         names = [d[0] for d in cur.description] if cur.description else []
         import duckdb
-        
+
         if getattr(conn, "row_factory", None) is sqlite3.Row and not isinstance(conn, duckdb.DuckDBPyConnection):
             out = [dict(r) for r in rows]
         else:
@@ -189,7 +193,7 @@ def get_profile_schema(
         return "(No tables specified.)"
 
     parts = []
-    
+
     # Support DuckDB connection
     import duckdb
 
@@ -204,7 +208,7 @@ def get_profile_schema(
             except duckdb.Error:
                 pass
         return "\n\n".join(parts) if parts else "(Could not read schema from DuckDB.)"
-        
+
     # Standard SQLite path
     placeholders = ",".join("?" * len(want))
     try:
