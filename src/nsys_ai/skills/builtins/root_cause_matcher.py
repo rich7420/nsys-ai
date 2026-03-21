@@ -280,6 +280,24 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                         }
                     )
 
+    # Use a bounded default limit to avoid huge result sets; allow caller override
+    layer_kwargs = dict(kwargs)
+    layer_kwargs.setdefault("limit", 500)
+    layer_data = _safe_execute("nvtx_layer_breakdown", conn, **layer_kwargs)
+    if layer_data and len(layer_data) >= 2:
+        try:
+            nccl_hotspot_pct = float(kwargs.get("nccl_hotspot_pct", 40.0))
+        except (ValueError, TypeError):
+            nccl_hotspot_pct = 40.0
+
+        try:
+            imbalance_ratio = float(kwargs.get("imbalance_ratio", 3.0))
+        except (ValueError, TypeError):
+            imbalance_ratio = 3.0
+
+        findings += _check_layer_nccl_hotspot(layer_data, threshold_pct=nccl_hotspot_pct)
+        findings += _check_pipeline_imbalance(layer_data, threshold_ratio=imbalance_ratio)
+
     # --- nsys anti-pattern checks (direct SQL) ---
     # These cover the 4 expert-rule recipes from nsys:
     # cuda_api_sync, cuda_memcpy_sync, cuda_memcpy_async, cuda_memset_sync
@@ -396,6 +414,99 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
             _log.debug("_diagnose_low_overlap (sync_after_nccl): %s", e)
 
     return {"cause": "general", "detail": ""}
+
+
+# -----------------------------------------------------------------------
+# Per-layer NVTX breakdown pattern checkers
+# -----------------------------------------------------------------------
+
+
+def _check_layer_nccl_hotspot(
+    layer_data: list[dict], threshold_pct: float = 40.0
+) -> list[dict]:
+    """Detect when one NVTX region dominates total NCCL time.
+
+    Args:
+        threshold_pct: Fire when a region exceeds this % of total NCCL (default 40).
+    """
+    total_nccl = sum(r.get("nccl_ms", 0) for r in layer_data)
+    if total_nccl <= 0:
+        return []
+
+    findings = []
+    for r in layer_data:
+        nccl_ms = r.get("nccl_ms", 0)
+        if nccl_ms <= 0:
+            continue
+        pct = 100.0 * nccl_ms / total_nccl
+        if pct > threshold_pct:
+            path = r.get("nvtx_path", r.get("nvtx_region", ""))
+            findings.append(
+                {
+                    "pattern": "Layer NCCL Hotspot",
+                    "severity": "warning",
+                    "evidence": (
+                        f"'{r['nvtx_region']}' accounts for {pct:.0f}% of total NCCL time "
+                        f"({nccl_ms:.1f}ms / {total_nccl:.1f}ms). "
+                        f"Path: {path}"
+                    ),
+                    "recommendation": (
+                        "Consider activation recomputation for this layer to pipeline "
+                        "backward computation and NCCL communication, "
+                        "or check if gradient bucketing can be rebalanced."
+                    ),
+                }
+            )
+    return findings
+
+
+def _check_pipeline_imbalance(
+    layer_data: list[dict], threshold_ratio: float = 3.0
+) -> list[dict]:
+    """Detect compute time imbalance across NVTX layers.
+
+    Args:
+        threshold_ratio: Fire when max/min compute ratio exceeds this (default 3.0).
+    """
+    # Only consider layers with measurable compute
+    compute_layers = [
+        r for r in layer_data
+        if r.get("compute_ms", 0) > 0.01  # > 10µs
+    ]
+    if len(compute_layers) < 2:
+        return []
+
+    compute_times = [r["compute_ms"] for r in compute_layers]
+    max_compute = max(compute_times)
+    min_compute = min(ct for ct in compute_times if ct > 0)
+    ratio = max_compute / min_compute if min_compute > 0 else 0
+
+    if ratio < threshold_ratio:
+        return []
+
+    # Find the heaviest and lightest layers
+    heaviest = max(compute_layers, key=lambda r: r["compute_ms"])
+    lightest = min(compute_layers, key=lambda r: r["compute_ms"])
+
+    heaviest_label = heaviest.get("nvtx_path") or heaviest.get("nvtx_region", "?")
+    lightest_label = lightest.get("nvtx_path") or lightest.get("nvtx_region", "?")
+
+    return [
+        {
+            "pattern": "Pipeline Imbalance",
+            "severity": "warning",
+            "evidence": (
+                f"Compute time varies {ratio:.1f}× across layers. "
+                f"Heaviest: '{heaviest_label}' ({heaviest['compute_ms']:.1f}ms), "
+                f"lightest: '{lightest_label}' ({lightest['compute_ms']:.1f}ms)"
+            ),
+            "recommendation": (
+                "Rebalance pipeline stage partitioning, "
+                "or investigate if the heavy layer has suboptimal kernel configuration "
+                "(e.g. too many small kernels, poor tiling)."
+            ),
+        }
+    ]
 
 
 # -----------------------------------------------------------------------

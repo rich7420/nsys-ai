@@ -90,6 +90,8 @@ def _run_nsys_recipe(nsys_rep_path: str, trim: tuple[int, int] | None = None) ->
         rows.append(
             {
                 "nvtx_text": row.get("NVTX Range", row.get("Name", "")),
+                "nvtx_depth": 0,
+                "nvtx_path": row.get("NVTX Range", row.get("Name", "")),
                 "kernel_name": row.get("Kernel Name", row.get("Operation", "")),
                 "k_start": start_ns,
                 "k_end": end_ns,
@@ -229,27 +231,42 @@ def _sort_merge_attribute(
         open_stack: list[tuple[int, int, str]] = []  # (start, end, text)
 
         for r_start, r_end, k_start, k_end, short_name in kr_by_tid[tid]:
-            # Advance NVTX pointer, pushing any ranges that have opened by r_start
-            while nvtx_idx < len(nvtx_list) and nvtx_list[nvtx_idx][0] <= r_start:
-                open_stack.append(nvtx_list[nvtx_idx])
-                nvtx_idx += 1
-
-            # Pop NVTX ranges that have already closed before this runtime starts
+            # 1. Pop NVTX ranges that have already closed before this runtime starts
+            # Because NVTX ranges are assumed strictly nested per thread, O(1) amortized
             while open_stack and open_stack[-1][1] < r_start:
                 open_stack.pop()
 
+            # 2. Advance NVTX pointer, pushing any ranges that have opened by r_start
+            # but ONLY if they are still active.
+            while nvtx_idx < len(nvtx_list) and nvtx_list[nvtx_idx][0] <= r_start:
+                if nvtx_list[nvtx_idx][1] >= r_start:
+                    open_stack.append(nvtx_list[nvtx_idx])
+                nvtx_idx += 1
+
             # Find innermost enclosing NVTX (scan stack from top)
             best_nvtx = None
+            best_idx = -1
             for i in range(len(open_stack) - 1, -1, -1):
                 ns, ne, nt = open_stack[i]
                 if ns <= r_start and ne >= r_end:
                     best_nvtx = nt
+                    best_idx = i
                     break
 
             if best_nvtx is not None:
+                # Build path only from NVTX ranges that actually enclose [r_start, r_end]
+                enclosing_ranges = [
+                    entry for entry in open_stack[: best_idx + 1]
+                    if entry[0] <= r_start and entry[1] >= r_end
+                ]
+                # Derive depth from the number of enclosing ranges (0-based)
+                nvtx_depth = len(enclosing_ranges) - 1
+                path_parts = [entry[2] for entry in enclosing_ranges]
                 results.append(
                     {
                         "nvtx_text": best_nvtx,
+                        "nvtx_depth": nvtx_depth,
+                        "nvtx_path": " > ".join(path_parts),
                         "kernel_name": sid_map.get(short_name, f"kernel_{short_name}"),
                         "k_start": k_start,
                         "k_end": k_end,
@@ -275,7 +292,8 @@ def attribute_kernels_to_nvtx(
       - Tier 2: Python sort-merge O(N+M) sweep on .sqlite data
 
     Returns list of dicts with keys:
-      nvtx_text, kernel_name, k_start, k_end, k_dur_ns
+      nvtx_text, nvtx_depth, nvtx_path,
+      kernel_name, k_start, k_end, k_dur_ns
     """
     # Tier 1: Try nsys recipe if we can find the .nsys-rep file
     if sqlite_path:
