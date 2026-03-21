@@ -153,7 +153,13 @@ SKILL = Skill(
     params=[
         SkillParam("limit", "Max number of NVTX regions to return", "int", False, 20),
         SkillParam(
-            "depth", "Filter to specific NVTX nesting depth (0=top-level). Only supported when using Tier 2 sqlite attribution.", "int", False, None
+            "depth",
+            "Filter to specific NVTX nesting depth (0=top-level). Applied when "
+            "nvtx_depth metadata is available; with Tier 1 attribution all regions "
+            "are depth 0 so depth>0 will typically return no results.",
+            "int",
+            False,
+            None,
         ),
     ],
     format_fn=_format,
