@@ -90,6 +90,8 @@ def _run_nsys_recipe(nsys_rep_path: str, trim: tuple[int, int] | None = None) ->
         rows.append(
             {
                 "nvtx_text": row.get("NVTX Range", row.get("Name", "")),
+                "nvtx_depth": 0,
+                "nvtx_path": row.get("NVTX Range", row.get("Name", "")),
                 "kernel_name": row.get("Kernel Name", row.get("Operation", "")),
                 "k_start": start_ns,
                 "k_end": end_ns,
@@ -240,16 +242,22 @@ def _sort_merge_attribute(
 
             # Find innermost enclosing NVTX (scan stack from top)
             best_nvtx = None
+            best_idx = -1
             for i in range(len(open_stack) - 1, -1, -1):
                 ns, ne, nt = open_stack[i]
                 if ns <= r_start and ne >= r_end:
                     best_nvtx = nt
+                    best_idx = i
                     break
 
             if best_nvtx is not None:
+                # Build path from all enclosing NVTX up to and including the match
+                path_parts = [open_stack[j][2] for j in range(best_idx + 1)]
                 results.append(
                     {
                         "nvtx_text": best_nvtx,
+                        "nvtx_depth": best_idx,
+                        "nvtx_path": " > ".join(path_parts),
                         "kernel_name": sid_map.get(short_name, f"kernel_{short_name}"),
                         "k_start": k_start,
                         "k_end": k_end,
@@ -275,7 +283,8 @@ def attribute_kernels_to_nvtx(
       - Tier 2: Python sort-merge O(N+M) sweep on .sqlite data
 
     Returns list of dicts with keys:
-      nvtx_text, kernel_name, k_start, k_end, k_dur_ns
+      nvtx_text, nvtx_depth, nvtx_path,
+      kernel_name, k_start, k_end, k_dur_ns
     """
     # Tier 1: Try nsys recipe if we can find the .nsys-rep file
     if sqlite_path:

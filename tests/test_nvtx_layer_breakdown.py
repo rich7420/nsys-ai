@@ -1,0 +1,273 @@
+"""Tests for per-layer NVTX breakdown (PR #74).
+
+Tests cover:
+  - Layer 1: nvtx_attribution with depth and path
+  - Layer 2: nvtx_layer_breakdown skill with kernel composition
+  - Layer 3: root_cause_matcher layer-aware patterns
+  - Edge cases: no NVTX, flat NVTX
+"""
+
+import sqlite3
+
+# ---------------------------------------------------------------------------
+# Layer 1: nvtx_attribution depth + path
+# ---------------------------------------------------------------------------
+
+
+def test_nvtx_attribution_returns_depth_and_path(nested_nvtx_conn):
+    """Attribution results should include nvtx_depth and nvtx_path fields."""
+    from nsys_ai.nvtx_attribution import attribute_kernels_to_nvtx
+
+    rows = attribute_kernels_to_nvtx(nested_nvtx_conn)
+    assert len(rows) > 0
+    for r in rows:
+        assert "nvtx_depth" in r, f"Missing nvtx_depth in {r}"
+        assert "nvtx_path" in r, f"Missing nvtx_path in {r}"
+        assert isinstance(r["nvtx_depth"], int)
+        assert isinstance(r["nvtx_path"], str)
+        assert " > " in r["nvtx_path"] or r["nvtx_depth"] == 0
+
+
+def test_nvtx_attribution_innermost_correct(nested_nvtx_conn):
+    """Attribution should pick innermost NVTX (e.g., 'attention' not 'forward')."""
+    from nsys_ai.nvtx_attribution import attribute_kernels_to_nvtx
+
+    rows = attribute_kernels_to_nvtx(nested_nvtx_conn)
+    # Compute kernels should be attributed to attention/mlp (depth 3),
+    # NOT to forward/backward/train_step
+    compute_texts = {r["nvtx_text"] for r in rows if "gemm" in r["kernel_name"].lower()}
+    assert "attention" in compute_texts or "mlp" in compute_texts
+    assert "forward" not in compute_texts
+    assert "train_step" not in compute_texts
+
+
+def test_nvtx_attribution_nccl_attributed_to_allreduce(nested_nvtx_conn):
+    """NCCL kernels should be attributed to 'allreduce' NVTX."""
+    from nsys_ai.nvtx_attribution import attribute_kernels_to_nvtx
+
+    rows = attribute_kernels_to_nvtx(nested_nvtx_conn)
+    nccl_texts = {r["nvtx_text"] for r in rows if "nccl" in r["kernel_name"].lower()}
+    assert "allreduce" in nccl_texts
+
+
+def test_nvtx_attribution_path_hierarchy(nested_nvtx_conn):
+    """nvtx_path should reflect the full NVTX nesting (e.g. 'train_step > forward > layer_0 > attention')."""
+    from nsys_ai.nvtx_attribution import attribute_kernels_to_nvtx
+
+    rows = attribute_kernels_to_nvtx(nested_nvtx_conn)
+    paths = {r["nvtx_path"] for r in rows}
+    # At least one path should contain the full hierarchy
+    has_deep_path = any(">" in p and len(p.split(" > ")) >= 3 for p in paths)
+    assert has_deep_path, f"No deep paths found in: {paths}"
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: nvtx_layer_breakdown skill with kernel composition
+# ---------------------------------------------------------------------------
+
+
+def test_nvtx_layer_breakdown_kernel_composition(nested_nvtx_conn):
+    """Layer breakdown should split kernel time into compute and NCCL."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(nested_nvtx_conn)
+    assert len(rows) > 0
+
+    # Check that all rows have the new fields
+    for r in rows:
+        assert "compute_ms" in r
+        assert "nccl_ms" in r
+        assert "nccl_pct" in r
+        assert "nvtx_depth" in r
+        assert "nvtx_path" in r
+
+    # 'attention' and 'mlp' should have compute_ms > 0 and nccl_ms == 0
+    attention_rows = [r for r in rows if r["nvtx_region"] == "attention"]
+    mlp_rows = [r for r in rows if r["nvtx_region"] == "mlp"]
+    for region_rows in [attention_rows, mlp_rows]:
+        if region_rows:
+            assert region_rows[0]["compute_ms"] > 0
+            assert region_rows[0]["nccl_ms"] == 0
+
+    # 'allreduce' should have nccl_ms > 0
+    allreduce_rows = [r for r in rows if r["nvtx_region"] == "allreduce"]
+    if allreduce_rows:
+        assert allreduce_rows[0]["nccl_ms"] > 0
+        assert allreduce_rows[0]["nccl_pct"] > 0
+
+
+def test_nvtx_layer_breakdown_nccl_percentage(nested_nvtx_conn):
+    """nccl_pct should be correct per-layer."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(nested_nvtx_conn)
+    for r in rows:
+        if r["total_gpu_ms"] > 0:
+            expected_pct = round(100 * r["nccl_ms"] / r["total_gpu_ms"], 1)
+            assert abs(r["nccl_pct"] - expected_pct) < 0.2, (
+                f"nccl_pct mismatch for {r['nvtx_region']}: "
+                f"got {r['nccl_pct']}, expected {expected_pct}"
+            )
+
+
+def test_nvtx_layer_breakdown_depth_filtering(nested_nvtx_conn):
+    """depth=3 should return only innermost NVTX (attention, mlp, allreduce)."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(nested_nvtx_conn, depth=3)
+    assert len(rows) > 0
+    regions = {r["nvtx_region"] for r in rows}
+    # Should contain innermost regions
+    assert regions <= {"attention", "mlp", "allreduce"}
+    # Should NOT contain outer regions
+    assert "forward" not in regions
+    assert "train_step" not in regions
+    assert "layer_0" not in regions
+
+
+def test_nvtx_layer_breakdown_format(nested_nvtx_conn):
+    """Format output should include new columns."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(nested_nvtx_conn)
+    text = skill.format_rows(rows)
+    assert "NVTX Region" in text
+    assert "Compute" in text
+    assert "NCCL" in text
+    assert "NCCL%" in text
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: root_cause_matcher layer-aware patterns
+# ---------------------------------------------------------------------------
+
+
+def test_root_cause_layer_nccl_hotspot():
+    """_check_layer_nccl_hotspot should fire when one layer dominates NCCL."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_layer_nccl_hotspot
+
+    # Simulate: layer_1_bwd has 80ms NCCL, layer_0_bwd has 5ms NCCL
+    layer_data = [
+        {"nvtx_region": "layer_1_bwd", "nccl_ms": 80, "compute_ms": 10, "nvtx_path": "backward > layer_1_bwd"},
+        {"nvtx_region": "layer_0_bwd", "nccl_ms": 5, "compute_ms": 15, "nvtx_path": "backward > layer_0_bwd"},
+        {"nvtx_region": "attention", "nccl_ms": 0, "compute_ms": 30, "nvtx_path": "forward > attention"},
+    ]
+    findings = _check_layer_nccl_hotspot(layer_data)
+    assert len(findings) >= 1
+    assert findings[0]["pattern"] == "Layer NCCL Hotspot"
+    assert "layer_1_bwd" in findings[0]["evidence"]
+    assert findings[0]["severity"] == "warning"
+
+
+def test_root_cause_layer_nccl_hotspot_no_fire():
+    """_check_layer_nccl_hotspot should NOT fire when NCCL is balanced."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_layer_nccl_hotspot
+
+    layer_data = [
+        {"nvtx_region": "layer_0", "nccl_ms": 10, "compute_ms": 30},
+        {"nvtx_region": "layer_1", "nccl_ms": 12, "compute_ms": 28},
+        {"nvtx_region": "layer_2", "nccl_ms": 11, "compute_ms": 29},
+    ]
+    findings = _check_layer_nccl_hotspot(layer_data)
+    assert len(findings) == 0
+
+
+def test_root_cause_pipeline_imbalance():
+    """_check_pipeline_imbalance should fire when compute varies > 3×."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    layer_data = [
+        {"nvtx_region": "layer_heavy", "compute_ms": 30.0, "nccl_ms": 0},
+        {"nvtx_region": "layer_light", "compute_ms": 3.0, "nccl_ms": 0},
+    ]
+    findings = _check_pipeline_imbalance(layer_data)
+    assert len(findings) == 1
+    assert findings[0]["pattern"] == "Pipeline Imbalance"
+    assert "layer_heavy" in findings[0]["evidence"]
+    assert "layer_light" in findings[0]["evidence"]
+
+
+def test_root_cause_pipeline_imbalance_no_fire():
+    """_check_pipeline_imbalance should NOT fire when compute is balanced."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    layer_data = [
+        {"nvtx_region": "layer_0", "compute_ms": 10.0, "nccl_ms": 5},
+        {"nvtx_region": "layer_1", "compute_ms": 12.0, "nccl_ms": 4},
+    ]
+    findings = _check_pipeline_imbalance(layer_data)
+    assert len(findings) == 0
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_no_nvtx_graceful_fallback():
+    """Profile with no NVTX should return empty list, no crash."""
+    from nsys_ai.skills.registry import get_skill
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        INSERT INTO StringIds VALUES (1, 'kernel_A');
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            globalPid INT, deviceId INT, streamId INT, correlationId INT,
+            start INT, [end] INT, shortName INT, demangledName INT,
+            gridX INT, gridY INT, gridZ INT, blockX INT, blockY INT, blockZ INT
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+            (0, 0, 7, 1, 1000000, 2000000, 1, 1, 1,1,1,1,1,1);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+            globalTid INT, correlationId INT, start INT, [end] INT, nameId INT
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (100, 1, 500000, 1000000, 0);
+        CREATE TABLE NVTX_EVENTS (
+            globalTid INT, start INT, [end] INT, text TEXT, eventType INT, rangeId INT
+        );
+    """)
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(conn)
+    assert isinstance(rows, list)
+    assert len(rows) == 0
+    conn.close()
+
+
+def test_flat_nvtx_no_nesting():
+    """Flat NVTX (all depth 0) should work without errors."""
+    from nsys_ai.skills.registry import get_skill
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+        INSERT INTO StringIds VALUES (1, 'kernel_A'), (24, 'cudaLaunchKernel');
+        CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+            globalPid INT, deviceId INT, streamId INT, correlationId INT,
+            start INT, [end] INT, shortName INT, demangledName INT,
+            gridX INT, gridY INT, gridZ INT, blockX INT, blockY INT, blockZ INT
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+            (0, 0, 7, 1, 1000000, 2000000, 1, 1, 1,1,1,1,1,1);
+        CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+            globalTid INT, correlationId INT, start INT, [end] INT, nameId INT
+        );
+        INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (100, 1, 500000, 1000000, 24);
+        CREATE TABLE NVTX_EVENTS (
+            globalTid INT, start INT, [end] INT, text TEXT, eventType INT, rangeId INT
+        );
+        INSERT INTO NVTX_EVENTS VALUES (100, 0, 3000000, 'flat_region', 59, 0);
+    """)
+
+    skill = get_skill("nvtx_layer_breakdown")
+    rows = skill.execute(conn)
+    assert len(rows) >= 1
+    assert rows[0]["nvtx_region"] == "flat_region"
+    assert rows[0]["nvtx_depth"] == 0
+    assert rows[0]["compute_ms"] > 0
+    conn.close()
