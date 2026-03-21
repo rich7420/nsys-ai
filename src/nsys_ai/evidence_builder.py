@@ -283,7 +283,7 @@ LIMIT ?"""
                     gpu_id=self.device,
                     severity="info",
                     note=(
-                        f"Total: {total_idle_ns / 1e6:.1f}ms idle across "
+                        f"Total: {total_idle_ns / 1e6:.1f}ms idle across top "
                         f"{len(rows)} gaps ({pct}% of profiled span)"
                     ),
                 )

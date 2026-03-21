@@ -20,9 +20,9 @@ _GAP_CLASSIFICATIONS = [
     ("cudaDeviceSynchronize", "synchronization", "Explicit GPU sync stall"),
     ("cudaStreamSynchronize", "synchronization", "Stream sync stall"),
     ("cudaEventSynchronize", "synchronization", "Event sync stall"),
-    ("cudaMemcpyAsync", "kernel_launch", "Async memory transfer (non-blocking)"),
+    ("cudaMemcpyAsync", "memory_transfer", "Async memory transfer (non-blocking)"),
     ("cudaMemcpy", "memory_transfer", "Blocked on memory transfer"),
-    ("cudaMemsetAsync", "kernel_launch", "Async memory set (non-blocking)"),
+    ("cudaMemsetAsync", "memory_transfer", "Async memory set (non-blocking)"),
     ("cudaMemset", "memory_transfer", "Blocked on memory set"),
     ("cudaLaunchKernel", "kernel_launch", "Kernel launch overhead"),
 ]
