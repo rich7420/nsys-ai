@@ -183,17 +183,13 @@ def build_cache(sqlite_path: str) -> Path:
                 ) TO '{cache_dir}/nvtx.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
 
-    # ── Export base tables ────────────────────────────────────────────
     for view_name, src_name in _BASE_TABLES:
         actual = _find_table(src_tables, src_name)
         if actual:
-            try:
-                db.execute(f"""
-                    COPY src.{actual}
-                    TO '{cache_dir}/{view_name}.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
-                """)
-            except duckdb.Error as e:
-                log.warning("Failed to export %s: %s", src_name, e)
+            db.execute(f"""
+                COPY src.{actual}
+                TO '{cache_dir}/{view_name}.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """)
 
     # ── Generate nvtx_kernel_map via Tier 2 sort-merge ────────────────
     _build_nvtx_kernel_map(db, src_tables, cache_dir, sqlite_path)
