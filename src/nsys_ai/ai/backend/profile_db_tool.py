@@ -160,7 +160,7 @@ def query_profile_db(
                 "(e.g. start, [end], shortName) or reduce the LIMIT."
             )
         return json_str
-    except sqlite3.Error as e:
+    except (sqlite3.Error, duckdb.Error) as e:
         return f"Error: Database error: {e}"
 
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -111,7 +110,7 @@ def build_cache(sqlite_path: str) -> Path:
         shutil.rmtree(cache_dir, ignore_errors=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Building analysis cache (first run only)...", file=sys.stderr, flush=True)
+    log.info("Building analysis cache (first run only)...")
     t0 = time.monotonic()
 
     db = duckdb.connect()
@@ -207,10 +206,9 @@ def build_cache(sqlite_path: str) -> Path:
     # ── Size report ───────────────────────────────────────────────────
     total_bytes = sum(f.stat().st_size for f in cache_dir.iterdir() if f.is_file())
     elapsed = time.monotonic() - t0
-    print(
-        f"Cache ready: {cache_dir.name}/ ({total_bytes / 1e6:.0f}MB, {elapsed:.1f}s)",
-        file=sys.stderr,
-        flush=True,
+    log.info(
+        "Cache ready: %s/ (%.0fMB, %.1fs)",
+        cache_dir.name, total_bytes / 1e6, elapsed,
     )
 
     _check_cache_size(cache_dir, sqlite_path)

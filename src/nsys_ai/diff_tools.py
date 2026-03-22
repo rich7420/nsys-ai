@@ -691,11 +691,17 @@ def get_launch_config_diff(
     """
     Grid/block/registers before vs after; explains 'why'. Returns error when columns missing (BETA).
     """
-    # Launch-config columns are BETA; detect with DESCRIBE
+    # Launch-config columns are BETA; detect available columns
     kt = ctx.before.schema.kernel_table
     try:
-        col_rows = ctx.before._duckdb_query(f"DESCRIBE {kt}")
-        cols = [r.get("column_name") or r.get("name") or "" for r in col_rows]
+        if ctx.before.db is not None:
+            # DuckDB path: DESCRIBE is valid
+            col_rows = ctx.before._duckdb_query(f"DESCRIBE {kt}")
+            cols = [r.get("column_name") or r.get("name") or "" for r in col_rows]
+        else:
+            # SQLite fallback: DESCRIBE is not valid, use PRAGMA
+            with ctx.before._lock:
+                cols = [r[1] for r in ctx.before.conn.execute(f"PRAGMA table_info({kt})").fetchall()]
     except Exception:
         cols = []
     if not ("gridX" in cols or "blockX" in cols):

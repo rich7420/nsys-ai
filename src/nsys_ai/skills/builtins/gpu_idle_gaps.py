@@ -44,6 +44,12 @@ def _classify_gap_apis(api_names: list[str]) -> tuple[str, str]:
 
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Execute GPU idle gaps analysis with aggregation and CPU attribution."""
+    import duckdb
+
+    if isinstance(conn, duckdb.DuckDBPyConnection):
+        # DuckDB has no row_factory; _execute_inner builds dicts via cursor.description
+        return _execute_inner(conn, **kwargs)
+
     # Ensure row_factory is set for dict-like access from raw SQL
     old_factory = conn.row_factory
     conn.row_factory = sqlite3.Row
