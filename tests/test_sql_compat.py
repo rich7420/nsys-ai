@@ -40,3 +40,9 @@ class TestSqliteToDuckdb:
     def test_window_function(self):
         sql = "LAG([end]) OVER (ORDER BY start)"
         assert sqlite_to_duckdb(sql) == 'LAG("end") OVER (ORDER BY start)'
+
+    def test_hex_literal(self):
+        """DuckDB does not support 0x... hex literals natively in standard SQL mode."""
+        sql = "SELECT [end] - start FROM k WHERE start > 0x1000000"
+        # 0x1000000 is 16777216
+        assert sqlite_to_duckdb(sql) == 'SELECT "end" - start FROM k WHERE start > 16777216'

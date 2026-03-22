@@ -639,13 +639,22 @@ class Profile:
                 return [dict(r) for r in conn.execute(sql, params or [])]
 
     def close(self):
+        # Close the primary connection only if we own it.
         if getattr(self, "_owns_conn", True):
             self.conn.close()
-        if getattr(self, "db", None) is not None:
-            try:
-                self.db.close()
-            except Exception:
-                pass
+
+        db = getattr(self, "db", None)
+        if db is None:
+            return
+
+        # If db is just an alias to a borrowed conn, do not close it.
+        if db is self.conn and not getattr(self, "_owns_conn", True):
+            return
+
+        try:
+            db.close()
+        except Exception:
+            pass
 
     def __enter__(self) -> "Profile":
         return self

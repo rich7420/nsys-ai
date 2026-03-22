@@ -78,8 +78,8 @@ def is_cache_valid(sqlite_path: str) -> bool:
     except OSError:
         return False
 
-    # Quick sanity: at least the kernels parquet must exist
-    if not (cache_dir / "kernels.parquet").exists():
+    # Quick sanity: at least one core Parquet (e.g., string_ids) must exist
+    if not (cache_dir / "string_ids.parquet").exists():
         return False
 
     return True

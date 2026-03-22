@@ -175,7 +175,7 @@ def get_profile_schema(
     sqlite_master for that table and NVTX_EVENTS (if present).
     """
     try:
-        from .profile import NsightSchema
+        from nsys_ai.profile import NsightSchema
 
         ns = NsightSchema(conn)
         kernel_table = ns.kernel_table
