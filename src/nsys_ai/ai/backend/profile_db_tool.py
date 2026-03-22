@@ -28,11 +28,17 @@ NVTX_TABLE = "NVTX_EVENTS"
 STRING_IDS_TABLE = "StringIds"
 
 # Regex: reject any mutating or dangerous SQL (including DuckDB-specific statements
-# like COPY/EXPORT that can write files, ATTACH that can read arbitrary files, and
-# INSTALL/LOAD that can load extensions).
+# like COPY/EXPORT that can write files, ATTACH that can read arbitrary files,
+# INSTALL/LOAD that can load extensions, and table functions like read_csv_auto /
+# parquet_scan that can read arbitrary host files).
 _READ_ONLY_BLOCK = re.compile(
-    r"(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE"
-    r"|COPY|EXPORT|ATTACH|DETACH|INSTALL|LOAD|PRAGMA|SET|CALL)\b"
+    r"(?i)("
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|TRUNCATE"
+    r"|COPY|EXPORT|ATTACH|DETACH|INSTALL|LOAD|PRAGMA|SET|CALL"
+    r"|READ_CSV_AUTO|PARQUET_SCAN|READ_PARQUET|JSON_SCAN|CSV_AUTO_SCAN"
+    r"|READ_CSV|READ_JSON|READ_JSON_AUTO)\b"
+    r"|\bFROM\s+['\"]"  # FROM 'path.parquet' / FROM "path"
+    r")"
 )
 
 

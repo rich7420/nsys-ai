@@ -119,10 +119,17 @@ def build_cache(sqlite_path: str) -> Path:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
 
-    # Atomic swap: remove old cache (if any) and rename temp → final.
+    # Atomic swap: rename old cache aside, rename new into place, then clean up.
+    # This avoids a window where the cache directory is missing for concurrent readers.
+    old_dir = cache_dir.parent / (cache_dir.name + ".old")
+    if old_dir.exists():
+        shutil.rmtree(old_dir, ignore_errors=True)
     if cache_dir.exists():
-        shutil.rmtree(cache_dir, ignore_errors=True)
+        cache_dir.rename(old_dir)
     tmp_dir.rename(cache_dir)
+    # Clean up the old cache (now renamed aside).
+    if old_dir.exists():
+        shutil.rmtree(old_dir, ignore_errors=True)
     return cache_dir
 
 
