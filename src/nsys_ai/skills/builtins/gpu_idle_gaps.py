@@ -138,7 +138,13 @@ FROM ordered
 WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     try:
         from ...sql_compat import sqlite_to_duckdb
-        agg = dict(conn.execute(sqlite_to_duckdb(agg_sql), trim_params + [min_gap_ns]).fetchone())
+        cur_agg = conn.execute(sqlite_to_duckdb(agg_sql), trim_params + [min_gap_ns])
+        agg_row = cur_agg.fetchone()
+        if agg_row is not None:
+            agg_cols = [d[0] for d in cur_agg.description]
+            agg = dict(zip(agg_cols, agg_row))
+        else:
+            agg = {}
     except Exception:
         agg = {}
 
@@ -156,7 +162,7 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             sqlite_to_duckdb(f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"),
             trim_params,
         ).fetchone()
-        n_streams = stream_count_row["n"] if stream_count_row else 1
+        n_streams = stream_count_row[0] if stream_count_row else 1
     except Exception:
         profile_span_ns = 0
         n_streams = 1
@@ -186,7 +192,7 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             gap_end = gap["end_ns"]
             try:
                 from ...sql_compat import sqlite_to_duckdb
-                api_rows = conn.execute(sqlite_to_duckdb(
+                cur_api = conn.execute(sqlite_to_duckdb(
                     f"""\
 SELECT s.value AS api_name, COUNT(*) AS call_count,
        SUM(r.[end] - r.start) AS total_ns
@@ -196,8 +202,10 @@ WHERE r.start < ? AND r.[end] > ?
 GROUP BY s.value
 ORDER BY total_ns DESC
 LIMIT 5"""
-                ), (gap_end, gap_start)).fetchall()
-                apis = [dict(r) for r in api_rows]
+                ), (gap_end, gap_start))
+                api_rows = cur_api.fetchall()
+                api_cols = [d[0] for d in cur_api.description]
+                apis = [dict(zip(api_cols, r)) for r in api_rows]
             except Exception:
                 apis = []
 

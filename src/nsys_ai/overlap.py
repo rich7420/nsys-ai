@@ -212,69 +212,69 @@ def detect_iterations(
     # If no NVTX markers match, fall back to detecting iterations by finding
     # large gaps in kernel execution on the primary CPU thread across all streams.
     if not iterations:
-            rt_all = prof._duckdb_query(
-                f"""
-                SELECT correlationId, start, [end] FROM {runtime_table}
-                WHERE globalTid = ? ORDER BY start
-                """,
-                (primary_tid,),
+        rt_all = prof._duckdb_query(
+            f"""
+            SELECT correlationId, start, [end] FROM {runtime_table}
+            WHERE globalTid = ? ORDER BY start
+            """,
+            (primary_tid,),
+        )
+
+        if not rt_all:
+            return []
+
+        # Keep both kernel and runtime timestamps so that heuristic
+        # boundaries can be expressed in runtime (CPU) time domain,
+        # matching the downstream rt-based iteration correlation.
+        kernel_entries = []
+        for rt in rt_all:
+            k = kmap.get(rt["correlationId"])
+            if not k:
+                continue
+            # Apply the same time window constraints as the NVTX path
+            if time_range is not None:
+                if k["end"] < time_range[0] or k["start"] > time_range[1]:
+                    continue
+            kernel_entries.append(
+                {
+                    "kernel": k,
+                    "rt_start": rt["start"],
+                    "rt_end": rt["end"],
+                }
             )
 
-            if not rt_all:
-                return []
+        kernel_entries.sort(key=lambda x: x["kernel"]["start"])
 
-            # Keep both kernel and runtime timestamps so that heuristic
-            # boundaries can be expressed in runtime (CPU) time domain,
-            # matching the downstream rt-based iteration correlation.
-            kernel_entries = []
-            for rt in rt_all:
-                k = kmap.get(rt["correlationId"])
-                if not k:
-                    continue
-                # Apply the same time window constraints as the NVTX path
-                if time_range is not None:
-                    if k["end"] < time_range[0] or k["start"] > time_range[1]:
-                        continue
-                kernel_entries.append(
-                    {
-                        "kernel": k,
-                        "rt_start": rt["start"],
-                        "rt_end": rt["end"],
-                    }
-                )
+        if not kernel_entries:
+            return []
 
-            kernel_entries.sort(key=lambda x: x["kernel"]["start"])
+        # Find gaps > 2ms (2,000,000 ns) between kernels to denote step
+        # boundaries.  Gap detection uses kernel timestamps (GPU domain),
+        # but boundaries are recorded in runtime timestamps (CPU domain)
+        # so the downstream rt-based filter works correctly.
+        GAP_THRESHOLD_NS = 2_000_000
+        boundaries = [kernel_entries[0]["rt_start"]]
 
-            if not kernel_entries:
-                return []
+        last_k_end = kernel_entries[0]["kernel"]["end"]
+        for entry in kernel_entries[1:]:
+            k = entry["kernel"]
+            if k["start"] - last_k_end > GAP_THRESHOLD_NS:
+                # Boundary detected: new step starts at this kernel's
+                # runtime start so the downstream filter includes it.
+                boundaries.append(entry["rt_start"])
+            last_k_end = max(last_k_end, k["end"])
 
-            # Find gaps > 2ms (2,000,000 ns) between kernels to denote step
-            # boundaries.  Gap detection uses kernel timestamps (GPU domain),
-            # but boundaries are recorded in runtime timestamps (CPU domain)
-            # so the downstream rt-based filter works correctly.
-            GAP_THRESHOLD_NS = 2_000_000
-            boundaries = [kernel_entries[0]["rt_start"]]
+        boundaries.append(kernel_entries[-1]["rt_end"])
 
-            last_k_end = kernel_entries[0]["kernel"]["end"]
-            for entry in kernel_entries[1:]:
-                k = entry["kernel"]
-                if k["start"] - last_k_end > GAP_THRESHOLD_NS:
-                    # Boundary detected: new step starts at this kernel's
-                    # runtime start so the downstream filter includes it.
-                    boundaries.append(entry["rt_start"])
-                last_k_end = max(last_k_end, k["end"])
-
-            boundaries.append(kernel_entries[-1]["rt_end"])
-
-            # Construct synthetic iterations from these boundaries
-            for i in range(len(boundaries) - 1):
-                iterations.append(
-                    {
-                        "start": boundaries[i],
-                        "end": boundaries[i + 1],
-                        "text": f"heuristic_step_{i}",
-                    }
-                )
+        # Construct synthetic iterations from these boundaries
+        for i in range(len(boundaries) - 1):
+            iterations.append(
+                {
+                    "start": boundaries[i],
+                    "end": boundaries[i + 1],
+                    "text": f"heuristic_step_{i}",
+                }
+            )
 
     if not iterations:
         return []
