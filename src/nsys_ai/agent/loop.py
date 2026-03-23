@@ -86,11 +86,26 @@ class Agent:
         if trim_ns:
             self._trim_kwargs["trim_start_ns"] = trim_ns[0]
             self._trim_kwargs["trim_end_ns"] = trim_ns[1]
-        self.profile = Profile(profile_path)
+        try:
+            self.profile = Profile(profile_path)
+        except Exception as e:
+            import sqlite3 as _sqlite3
+            log.warning(
+                "Could not open as Nsight profile (skills may be limited): %s", e,
+            )
+            # Fallback: open as a raw SQLite connection so the agent can still
+            # run generic SQL queries even if schema detection fails.
+            self.profile = None  # type: ignore[assignment]
+            self.conn = _sqlite3.connect(profile_path, check_same_thread=False)
+            self.conn.row_factory = _sqlite3.Row
+            return
         self.conn = self.profile.db if self.profile.db is not None else self.profile.conn
 
     def close(self):
-        self.profile.close()
+        if self.profile is not None:
+            self.profile.close()
+        elif hasattr(self, "conn"):
+            self.conn.close()
 
     def analyze(self) -> str:
         """Run a full auto-analysis of the profile.

@@ -36,6 +36,15 @@ def sqlite_to_duckdb(sql: str) -> str:
       ``[start]`` → ``"start"``
       (any ``[identifier]`` → ``"identifier"``)
       ``0x1000000`` → ``16777216`` (hex literals to decimal)
+
+    .. note::
+
+       The rewriter applies regex substitutions across the raw SQL string.
+       It does **not** parse string literals or comments, so a hex literal
+       inside a quoted string (e.g. ``WHERE note = '0x10'``) would also be
+       rewritten.  In the Nsight Systems domain this never occurs — all hex
+       values appear as numeric comparisons — but callers dealing with
+       user-supplied string data should be aware of this limitation.
     """
     sql = _BRACKET_ID_RE.sub(r'"\1"', sql)
     sql = _HEX_LITERAL_RE.sub(_hex_to_decimal, sql)

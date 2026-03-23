@@ -1,11 +1,11 @@
-"""CPU thread utilization analysis."""
+from __future__ import annotations
 
-import sqlite3
+from typing import Any
 
 from ..base import Skill, SkillParam
 
 
-def _execute(conn: sqlite3.Connection, *, limit: int = 10, **_kwargs):
+def _execute(conn: Any, *, limit: int = 10, **_kwargs):
     """Check for COMPOSITE_EVENTS table before querying."""
     import duckdb as _ddb
 
