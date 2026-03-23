@@ -125,7 +125,7 @@ def build_cache(sqlite_path: str) -> Path:
     old_dir = cache_dir.parent / f"{cache_dir.name}.old.{os.getpid()}"
     if old_dir.exists():
         shutil.rmtree(old_dir, ignore_errors=True)
-    
+
     try:
         if cache_dir.exists():
             cache_dir.rename(old_dir)

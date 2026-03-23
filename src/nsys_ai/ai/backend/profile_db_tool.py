@@ -271,7 +271,7 @@ def get_profile_schema_cached(conn: sqlite3.Connection, path: str | None = None)
 
 def open_profile_readonly(path: str) -> "duckdb.DuckDBPyConnection | sqlite3.Connection":
     """Open a profile in read-only mode, using DuckDB Parquet cache if available.
-    
+
     Note: If the Parquet cache is missing or stale, this function will build
     a new `.nsys-cache` directory next to the profile before returning the
     connection. While the query connection itself is read-only, the cache-
