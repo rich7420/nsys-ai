@@ -125,9 +125,16 @@ def build_cache(sqlite_path: str) -> Path:
     old_dir = cache_dir.parent / f"{cache_dir.name}.old.{os.getpid()}"
     if old_dir.exists():
         shutil.rmtree(old_dir, ignore_errors=True)
-    if cache_dir.exists():
-        cache_dir.rename(old_dir)
-    tmp_dir.rename(cache_dir)
+    
+    try:
+        if cache_dir.exists():
+            cache_dir.rename(old_dir)
+        tmp_dir.rename(cache_dir)
+    except (FileExistsError, OSError):
+        # Another process won the race and created cache_dir first.
+        # Discard our redundant build.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
     # Clean up the old cache (now renamed aside).
     if old_dir.exists():
         shutil.rmtree(old_dir, ignore_errors=True)
