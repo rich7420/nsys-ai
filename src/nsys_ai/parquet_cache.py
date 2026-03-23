@@ -253,6 +253,16 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
         build_cache(sqlite_path)
 
     cache_dir = _cache_dir_for(sqlite_path)
+
+    # Validate that the cache actually contains parquet files.
+    # If build_cache() ran against a non-Nsight DB, the cache may be empty.
+    parquet_files = list(cache_dir.glob("*.parquet"))
+    if not parquet_files:
+        raise RuntimeError(
+            f"Parquet cache at {cache_dir} is empty — "
+            f"the source file may not be a valid Nsight Systems export"
+        )
+
     db = duckdb.connect()
 
     # Create views over Parquet files

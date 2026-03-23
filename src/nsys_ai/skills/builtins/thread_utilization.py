@@ -1,3 +1,5 @@
+"""Built-in skill that reports CPU thread utilization from COMPOSITE_EVENTS."""
+
 from __future__ import annotations
 
 from typing import Any

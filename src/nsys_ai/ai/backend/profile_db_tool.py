@@ -73,13 +73,16 @@ def _adaptive_limit(sql_upper: str, base_limit: int) -> int:
 
 
 def query_profile_db(
-    conn: sqlite3.Connection,
+    conn,
     sql_query: str,
     *,
     max_limit: int = DEFAULT_MAX_LIMIT,
 ) -> str:
     """
     Execute a read-only SELECT on the profile DB and return rows as a JSON string.
+
+    Accepts both sqlite3.Connection and duckdb.DuckDBPyConnection.
+    DuckDB connections get automatic SQL dialect translation via sqlite_to_duckdb().
 
     - Guardrail 1: Rejects any query containing INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/etc.
     - Guardrail 2: If no LIMIT or LIMIT > max_limit, enforces LIMIT max_limit.
