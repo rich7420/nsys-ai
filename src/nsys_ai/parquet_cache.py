@@ -152,6 +152,11 @@ def build_cache(sqlite_path: str) -> Path:
     return cache_dir
 
 
+def _safe_path(p: Path) -> str:
+    """Safely format a Path into a single-quoted string for DuckDB COPY."""
+    return p.as_posix().replace("'", "''")
+
+
 def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
     """Internal: build the Parquet cache into the given directory."""
 
@@ -201,7 +206,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                     FROM src.{kernel_table} k
                     LEFT JOIN src.StringIds s ON k.shortName = s.id
                     LEFT JOIN src.StringIds d ON k.demangledName = d.id
-                ) TO '{cache_dir}/kernels.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                ) TO '{_safe_path(cache_dir / "kernels.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
 
         # ── Export NVTX with resolved text ────────────────────────────────
@@ -217,7 +222,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                                n.textId
                         FROM src.{nvtx_table} n
                         LEFT JOIN src.StringIds s ON n.textId = s.id
-                    ) TO '{cache_dir}/nvtx.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                    ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
                 """)
             else:
                 db.execute(f"""
@@ -225,7 +230,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                         SELECT n.globalTid, n.start, n."end", n.eventType, n.rangeId,
                                n.text
                         FROM src.{nvtx_table} n
-                    ) TO '{cache_dir}/nvtx.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                    ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
                 """)
 
         for view_name, src_name in _BASE_TABLES:
@@ -233,7 +238,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             if actual:
                 db.execute(f"""
                     COPY src.{actual}
-                    TO '{cache_dir}/{view_name}.parquet' (FORMAT PARQUET, COMPRESSION ZSTD)
+                    TO '{_safe_path(cache_dir / f"{view_name}.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
                 """)
 
         # ── Generate nvtx_kernel_map via Tier 2 sort-merge ────────────────
@@ -505,7 +510,7 @@ def _build_nvtx_kernel_map(
         db.register("_nvtx_kernel_map", table)
         db.execute(f"""
             COPY _nvtx_kernel_map
-            TO '{cache_dir}/nvtx_kernel_map.parquet'
+            TO '{_safe_path(cache_dir / "nvtx_kernel_map.parquet")}'
             (FORMAT PARQUET, COMPRESSION ZSTD)
         """)
     finally:

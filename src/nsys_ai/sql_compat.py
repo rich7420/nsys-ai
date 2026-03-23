@@ -22,6 +22,18 @@ _BRACKET_ID_RE = re.compile(r"\[([A-Za-z_]\w*)\]")
 # Matches hex integer literals like 0x1000000 which DuckDB doesn't support.
 _HEX_LITERAL_RE = re.compile(r"\b0x([0-9a-fA-F]+)\b")
 
+# Tokenizer to split out string literals and comments, so we don't accidentally
+# rewrite [end] or 0x1A if they appear inside a string or comment.
+_TOKENS_RE = re.compile(
+    r"""(
+        '(?:[^']|'')*'     | # Single-quoted string literals
+        "(?:[^"]|"")*"     | # Double-quoted identifiers
+        --[^\n]*           | # Single-line comments
+        /\*.*?\*/            # Multi-line comments
+    )""",
+    re.VERBOSE | re.DOTALL,
+)
+
 
 def _hex_to_decimal(match: re.Match) -> str:
     """Convert a hex literal match to its decimal string equivalent."""
@@ -36,16 +48,16 @@ def sqlite_to_duckdb(sql: str) -> str:
       ``[start]`` → ``"start"``
       (any ``[identifier]`` → ``"identifier"``)
       ``0x1000000`` → ``16777216`` (hex literals to decimal)
-
-    .. note::
-
-       The rewriter applies regex substitutions across the raw SQL string.
-       It does **not** parse string literals or comments, so a hex literal
-       inside a quoted string (e.g. ``WHERE note = '0x10'``) would also be
-       rewritten.  In the Nsight Systems domain this never occurs — all hex
-       values appear as numeric comparisons — but callers dealing with
-       user-supplied string data should be aware of this limitation.
     """
-    sql = _BRACKET_ID_RE.sub(r'"\1"', sql)
-    sql = _HEX_LITERAL_RE.sub(_hex_to_decimal, sql)
-    return sql
+    if not sql:
+        return sql
+
+    parts = _TOKENS_RE.split(sql)
+    for i in range(0, len(parts), 2):
+        part = parts[i]
+        if not part:
+            continue
+        part = _BRACKET_ID_RE.sub(r'"\1"', part)
+        part = _HEX_LITERAL_RE.sub(_hex_to_decimal, part)
+        parts[i] = part
+    return "".join(parts)

@@ -46,3 +46,9 @@ class TestSqliteToDuckdb:
         sql = "SELECT [end] - start FROM k WHERE start > 0x1000000"
         # 0x1000000 is 16777216
         assert sqlite_to_duckdb(sql) == 'SELECT "end" - start FROM k WHERE start > 16777216'
+
+    def test_preserves_strings_and_comments(self):
+        """String literals and comments should not be rewritten."""
+        # Inside quotes, [end] stays [end] and 0x10 stays 0x10.
+        sql = "SELECT '[end]', '0x10' -- [foo] 0x20\n/* [bar] 0x30 */"
+        assert sqlite_to_duckdb(sql) == sql
