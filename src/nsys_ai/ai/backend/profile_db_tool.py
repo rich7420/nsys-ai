@@ -109,51 +109,57 @@ def query_profile_db(
             "SELECT start, [end], shortName FROM <table> WHERE ... LIMIT 20"
         )
 
-    # Adaptive LIMIT: narrow projections allow more rows; wide ones get fewer.
-    effective_limit = _adaptive_limit(upper, max_limit)
+    import sqlite3
 
-    # Enforce LIMIT: if no LIMIT append; if LIMIT > effective_limit rewrite.
-    limit_match = re.search(r"\bLIMIT\s+(\d+)", upper, re.IGNORECASE)
-    if limit_match:
-        n = int(limit_match.group(1))
-        if n > effective_limit:
-            q = re.sub(
-                r"\bLIMIT\s+" + str(n) + r"\b",
-                f"LIMIT {effective_limit}",
-                q,
-                count=1,
-                flags=re.IGNORECASE,
-            )
-    else:
-        q = q + f" LIMIT {effective_limit}"
-
-    # DuckDB translation for LLM-generated SQL
     import duckdb
-    if isinstance(conn, duckdb.DuckDBPyConnection):
-        from nsys_ai.sql_compat import sqlite_to_duckdb
-        q = sqlite_to_duckdb(q)
 
     # Rewrite sqlite_master to SHOW TABLES (LLMs love sqlite_master)
-    if "sqlite_master" in q.lower() and isinstance(conn, duckdb.DuckDBPyConnection):
+    if "SQLITE_MASTER" in upper and isinstance(conn, duckdb.DuckDBPyConnection):
         q = "SHOW TABLES"
+        upper = "SHOW TABLES"
 
     # SQLite fallback: support DuckDB-style helper commands used in docs.
     # This keeps schema discovery working even when DuckDB is unavailable.
-    import sqlite3
     if isinstance(conn, sqlite3.Connection):
-        stripped = q.strip().rstrip(";")
-        upper_stripped = stripped.upper()
-        # Support `SHOW TABLES` for SQLite
-        if upper_stripped == "SHOW TABLES":
+        if upper == "SHOW TABLES":
             q = (
                 "SELECT name AS table_name "
                 "FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
-        # Support `DESCRIBE <table>` for SQLite
-        elif upper_stripped.startswith("DESCRIBE "):
-            table_name = stripped[9:].strip().strip("'\"`[]")
-            q = f"PRAGMA table_info('{table_name}')"
+            upper = q.upper()
+        elif upper.startswith("DESCRIBE "):
+            rest = q[9:].strip()
+            table_token = rest.split(None, 1)[0] if rest else ""
+            table_name = table_token.strip("'\"`[]")
+            safe_table_name = table_name.replace("'", "''")
+            q = f"PRAGMA table_info('{safe_table_name}')"
+            upper = q.upper()
+
+    # DuckDB translation for LLM-generated SQL
+    if isinstance(conn, duckdb.DuckDBPyConnection) and "SHOW TABLES" not in upper and "DESCRIBE " not in upper:
+        from nsys_ai.sql_compat import sqlite_to_duckdb
+        q = sqlite_to_duckdb(q)
+        upper = q.upper()
+
+    # Adaptive LIMIT: narrow projections allow more rows; wide ones get fewer.
+    effective_limit = _adaptive_limit(upper, max_limit)
+
+    # Enforce LIMIT only on SELECT queries to avoid syntax errors on PRAGMA/SHOW
+    if upper.startswith("SELECT "):
+        limit_match = re.search(r"\bLIMIT\s+(\d+)", upper, re.IGNORECASE)
+        if limit_match:
+            n = int(limit_match.group(1))
+            if n > effective_limit:
+                q = re.sub(
+                    r"\bLIMIT\s+" + str(n) + r"\b",
+                    f"LIMIT {effective_limit}",
+                    q,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
+        else:
+            q = q + f" LIMIT {effective_limit}"
 
     try:
         cur = conn.execute(q)
@@ -197,7 +203,7 @@ def query_profile_db(
 
 
 def get_profile_schema(
-    conn: sqlite3.Connection,
+    conn: "sqlite3.Connection | duckdb.DuckDBPyConnection",
     table_names: tuple[str, ...] | None = None,
 ) -> str:
     """
@@ -266,7 +272,7 @@ _schema_cache: dict[str, str] = {}
 _schema_cache_lock = threading.Lock()
 
 
-def get_profile_schema_cached(conn: sqlite3.Connection, path: str | None = None) -> str:
+def get_profile_schema_cached(conn: "sqlite3.Connection | duckdb.DuckDBPyConnection", path: str | None = None) -> str:
     """
     Return schema for the given connection, using a cache keyed by path when provided.
     If path is None, always calls get_profile_schema(conn). Call with path when the
