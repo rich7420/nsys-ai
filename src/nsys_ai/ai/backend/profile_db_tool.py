@@ -79,13 +79,14 @@ def query_profile_db(
     max_limit: int = DEFAULT_MAX_LIMIT,
 ) -> str:
     """
-    Execute a read-only SELECT on the profile DB and return rows as a JSON string.
+    Execute a read-only query on the profile DB and return rows as a JSON string.
 
+    Supports SELECT queries, as well as SHOW TABLES and DESCRIBE <table> helpers.
     Accepts both sqlite3.Connection and duckdb.DuckDBPyConnection.
     DuckDB connections get automatic SQL dialect translation via sqlite_to_duckdb().
 
     - Guardrail 1: Rejects any query containing INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/etc.
-    - Guardrail 2: If no LIMIT or LIMIT > max_limit, enforces LIMIT max_limit.
+    - Guardrail 2: Enforces LIMIT max_limit on SELECT/WITH/FROM queries to prevent OOM.
     - Guardrail 3: Rejects broad SELECT * queries to avoid token explosion.
     - Returns: "[{\"col\": \"val\"}, ...]" or an error string for the model.
     """
@@ -93,7 +94,7 @@ def query_profile_db(
         return "Error: Empty query."
 
     if _READ_ONLY_BLOCK.search(sql_query):
-        return "Error: Read-only. Only SELECT queries are allowed."
+        return "Error: Read-only. Only SELECT/SHOW/DESCRIBE queries are allowed."
 
     q = sql_query.strip().rstrip(";")
     upper = q.upper()

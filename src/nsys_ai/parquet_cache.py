@@ -71,6 +71,7 @@ def is_cache_valid(sqlite_path: str) -> bool:
         meta = json.loads(version_file.read_text())
         if meta.get("version") != _CACHE_VERSION:
             return False
+        is_empty = meta.get("empty", False)
     except (json.JSONDecodeError, OSError):
         return False
 
@@ -83,8 +84,8 @@ def is_cache_valid(sqlite_path: str) -> bool:
     except OSError:
         return False
 
-    # Quick sanity: at least one core Parquet (e.g., string_ids) must exist
-    if not (cache_dir / "string_ids.parquet").exists():
+    # Quick sanity: at least one core Parquet (e.g., string_ids) must exist unless marked empty
+    if not is_empty and not (cache_dir / "string_ids.parquet").exists():
         return False
 
     return True
@@ -245,9 +246,12 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         _build_nvtx_kernel_map(db, src_tables, cache_dir, sqlite_path)
 
         # ── Write version stamp ───────────────────────────────────────────
-        (cache_dir / ".cache_version").write_text(
-            json.dumps({"version": _CACHE_VERSION, "source": os.path.basename(sqlite_path)})
-        )
+        meta = {
+            "version": _CACHE_VERSION,
+            "source": os.path.basename(sqlite_path),
+            "empty": len(src_tables) == 0 or not _find_table(src_tables, "StringIds")
+        }
+        (cache_dir / ".cache_version").write_text(json.dumps(meta))
 
         # ── Size report ───────────────────────────────────────────────────
         total_bytes = sum(f.stat().st_size for f in cache_dir.iterdir() if f.is_file())
