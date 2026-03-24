@@ -782,9 +782,10 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
 
 def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
     """Execute a skill, returning [] on any error."""
+    from ...exceptions import SkillExecutionError
     from ...skills.registry import get_skill
 
-    error_types = [sqlite3.Error]
+    error_types = [sqlite3.Error, SkillExecutionError]
     try:
         import duckdb
         error_types.extend([duckdb.Error, duckdb.CatalogException])

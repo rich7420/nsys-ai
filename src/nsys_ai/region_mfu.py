@@ -185,6 +185,11 @@ def _detect_nvtx_text_id(conn: sqlite3.Connection) -> bool:
     except (sqlite3.Error, ImportError) as exc:
         _log.debug("NVTX textId detection failed: %s", exc, exc_info=True)
         return False
+    except Exception as exc:
+        if type(exc).__module__.startswith("duckdb"):
+            _log.debug("NVTX textId detection failed (duckdb): %s", exc, exc_info=True)
+            return False
+        raise
 
 
 def find_nvtx_ranges(
