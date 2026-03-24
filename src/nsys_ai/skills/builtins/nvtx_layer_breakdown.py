@@ -22,7 +22,7 @@ from ..base import Skill, SkillParam
 def _execute(conn, **kwargs):
     """Execute NVTX region GPU time breakdown via attribution module."""
     from ...nvtx_attribution import attribute_kernels_to_nvtx
-    from ...nvtx_layer_detect import detect_layer_depth, is_outlier
+    from ...nvtx_layer_detect import detect_layer_depth
     from ...overlap import classify_kernel
 
     limit = int(kwargs.get("limit", 20))
@@ -130,7 +130,7 @@ def _execute(conn, **kwargs):
             stats["nvtx_path"] = group_key
             stats["nvtx_region"] = region_name
 
-    # Build aggregated results
+    # Build aggregated results (defer top-kernel extraction until after limit)
     results = []
     for path_key, stats in groups.items():
         total_ns = stats["total_ns"]
@@ -139,17 +139,10 @@ def _execute(conn, **kwargs):
         compute_ns = stats["compute_ns"]
         nccl_ns = stats["nccl_ns"]
 
-        # Top-3 hotspot kernels for this region (JSON embedded)
-        kernel_times = stats["kernel_times"]
-        top_k = sorted(kernel_times.items(), key=lambda x: -x[1])[:3]
-        top_kernels_list = [
-            {"kernel_name": k, "total_ms": round(v / 1e6, 3)}
-            for k, v in top_k
-        ]
-
         results.append(
             {
                 "_raw_total_ns": total_ns,
+                "_kernel_times": stats["kernel_times"],  # kept for deferred top-k
                 "nvtx_region": stats["nvtx_region"],
                 "nvtx_depth": stats["nvtx_depth"],
                 "nvtx_path": stats["nvtx_path"],
@@ -160,27 +153,42 @@ def _execute(conn, **kwargs):
                 "nccl_pct": round(100 * nccl_ns / total_ns, 1) if total_ns > 0 else 0,
                 "avg_kernel_ms": round(total_ns / count / 1e6, 3),
                 "max_kernel_ms": round(max_ns / 1e6, 3),
-                "top_kernels": top_kernels_list,
             }
         )
 
     # Sort by total GPU time descending
     results.sort(key=lambda r: -r["_raw_total_ns"])
 
-    # Cross-layer outlier detection
+    # Cross-layer outlier detection — precompute fence once (O(n) vs O(n²))
     if len(results) >= 2:
+        import statistics
+
         all_times = [r["_raw_total_ns"] / 1e6 for r in results]
+        med = statistics.median(all_times)
+        n = len(all_times)
+        if n < 4:
+            fence = med * 2.0
+        else:
+            q1, _, q3 = statistics.quantiles(all_times, n=4)
+            iqr = q3 - q1
+            fence = med * 2.0 if iqr == 0 else q3 + 1.5 * iqr
         for r in results:
-            r["is_outlier"] = is_outlier(r["_raw_total_ns"] / 1e6, all_times)
+            t = r["_raw_total_ns"] / 1e6
+            r["is_outlier"] = t > fence and t > med * 1.5
     else:
         for r in results:
             r["is_outlier"] = False
 
-    for r in results:
-        r.pop("_raw_total_ns", None)
-
-    # Apply limit
+    # Apply limit, then extract top-kernels only for kept results
     limited = results[:limit]
+    for r in limited:
+        kernel_times = r.pop("_kernel_times")
+        top_k = sorted(kernel_times.items(), key=lambda x: -x[1])[:3]
+        r["top_kernels"] = [
+            {"kernel_name": k, "total_ms": round(v / 1e6, 3)}
+            for k, v in top_k
+        ]
+        r.pop("_raw_total_ns", None)
 
     # Prepend detection metadata if auto-detection was used
     if detection_meta is not None:
