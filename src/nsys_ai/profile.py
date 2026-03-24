@@ -21,7 +21,6 @@ from nsys_ai.exceptions import (
     ExportError,
     ExportTimeoutError,
     ExportToolMissingError,
-    ProfileNotFoundError,
     SchemaError,
 )
 from nsys_ai.sql_compat import sqlite_to_duckdb

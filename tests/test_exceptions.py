@@ -23,7 +23,6 @@ from nsys_ai.exceptions import (
     SkillNotFoundError,
 )
 
-
 # ── Hierarchy ────────────────────────────────────────────────────────
 
 
@@ -157,7 +156,7 @@ class TestChaining:
 
     def test_from_chaining(self):
         original = RuntimeError("root cause")
-        wrapped = SchemaError("schema broken") 
+        wrapped = SchemaError("schema broken")
         wrapped.__cause__ = original
         assert wrapped.__cause__ is original
         assert str(wrapped.__cause__) == "root cause"

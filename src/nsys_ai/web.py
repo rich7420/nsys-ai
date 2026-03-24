@@ -11,6 +11,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import queue
 import signal
@@ -18,7 +19,6 @@ import socketserver
 import threading
 import time as _time
 import webbrowser
-import logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote
 

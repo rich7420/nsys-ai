@@ -12,9 +12,8 @@ import re
 import sqlite3
 from pathlib import Path
 
-from .base import Skill
-
 from ..exceptions import SkillNotFoundError
+from .base import Skill
 
 _log = logging.getLogger(__name__)
 

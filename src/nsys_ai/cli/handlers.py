@@ -558,10 +558,9 @@ def _cmd_chat(args, _profile):
 def _cmd_skill(args, _profile):
     import json as _json
 
+    from nsys_ai.exceptions import SkillExecutionError, SkillNotFoundError
     from nsys_ai.skills.registry import all_skills, get_skill, load_custom_skills_dir
     from nsys_ai.skills.registry import run_skill as _run_skill
-
-    from nsys_ai.exceptions import SkillExecutionError, SkillNotFoundError
 
     # Load custom skills from --skills-dir or env var
     skills_dir = getattr(args, "skills_dir", None) or os.environ.get("NSYS_AI_CUSTOM_SKILLS_DIR")
