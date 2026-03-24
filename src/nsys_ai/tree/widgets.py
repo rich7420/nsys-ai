@@ -314,7 +314,7 @@ class BookmarkPanel(Widget):
 
             self.app.query_one(DataTable).focus()
         except Exception as exc:
-            _log.debug("Focus recovery failed: %s", exc)
+            _log.debug("Focus recovery failed: %s", exc, exc_info=True)
 
     def action_close_panel(self) -> None:
         self.hide_panel()
@@ -381,7 +381,7 @@ class BubbleThresholdBar(Widget):
 
             self.app.query_one(DataTable).focus()
         except Exception as exc:
-            _log.debug("Focus recovery failed: %s", exc)
+            _log.debug("Focus recovery failed: %s", exc, exc_info=True)
 
     def show_bar(self, current_us: float) -> None:
         self.add_class("-visible")
@@ -421,7 +421,7 @@ class TrimBar(Widget):
 
             self.app.query_one(DataTable).focus()
         except Exception as exc:
-            _log.debug("Focus recovery failed: %s", exc)
+            _log.debug("Focus recovery failed: %s", exc, exc_info=True)
 
     def show_bar(self, trim: tuple[int, int]) -> None:
         self.add_class("-visible")

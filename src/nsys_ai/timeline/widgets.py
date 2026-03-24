@@ -216,7 +216,7 @@ class ConfigPanel(Widget):
 
             self.app.query_one("#canvas", TimelineCanvas).focus()
         except Exception as exc:
-            _log.debug("Focus recovery failed: %s", exc)
+            _log.debug("Focus recovery failed: %s", exc, exc_info=True)
             pass
 
 
@@ -367,7 +367,7 @@ class TimelineBookmarkPanel(Widget):
 
             self.app.query_one("#canvas", TimelineCanvas).focus()
         except Exception as exc:
-            _log.debug("Focus recovery failed: %s", exc)
+            _log.debug("Focus recovery failed: %s", exc, exc_info=True)
             pass
 
     def action_jump_1(self) -> None:

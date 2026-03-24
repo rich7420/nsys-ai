@@ -197,7 +197,7 @@ def load_custom_skills_dir(dir_path: str) -> list[Skill]:
             skill = load_skill_from_markdown(str(md_file))
             loaded.append(skill)
         except (ValueError, OSError) as exc:
-            _log.debug("Skipping %s: %s", md_file, exc)
+            _log.debug("Skipping %s: %s", md_file, exc, exc_info=True)
     return loaded
 
 

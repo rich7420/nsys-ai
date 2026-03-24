@@ -42,7 +42,7 @@ def _resolve_activity_tables(conn: sqlite3.Connection) -> dict[str, str]:
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
     except (sqlite3.Error, ImportError) as exc:
-        _log.debug("Failed to resolve activity tables: %s", exc)
+        _log.debug("Failed to resolve activity tables: %s", exc, exc_info=True)
         return {}
 
     def _find_by_prefix(prefix: str) -> str | None:
@@ -213,7 +213,7 @@ class Skill:
                         > 0
                     )
             except (sqlite3.Error, ImportError) as exc:
-                _log.debug("NVTX textId detection failed: %s", exc)
+                _log.debug("NVTX textId detection failed: %s", exc, exc_info=True)
                 has_textid = False
             if has_textid:
                 resolved.setdefault("nvtx_text_expr", "COALESCE(n.text, s2.value)")

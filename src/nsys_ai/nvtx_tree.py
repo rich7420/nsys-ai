@@ -59,7 +59,7 @@ def _get_thread_name(profile, tid: int) -> str:
             )
         return row[0]["value"] if row else ""
     except Exception as exc:
-        _log.debug("Thread name lookup failed for tid=%d: %s", tid, exc)
+        _log.debug("Thread name lookup failed for tid=%d: %s", tid, exc, exc_info=True)
         return ""
 
 
