@@ -534,11 +534,11 @@ def _check_layer_outlier(
         return []
 
     findings = []
+    import statistics
+
     for r in layer_data:
         t = r.get("total_gpu_ms", 0)
         if t > 0 and is_outlier(t, times):
-            import statistics
-
             path = r.get("nvtx_path") or r.get("nvtx_region", "?")
             median_ms = statistics.median(times)
             ratio = t / median_ms if median_ms > 0 else 0
