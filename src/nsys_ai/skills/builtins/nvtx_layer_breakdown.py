@@ -31,8 +31,19 @@ def _execute(conn, **kwargs):
         depth = int(depth)
 
     raw_auto_depth = kwargs.get("auto_depth", True)
-    if isinstance(raw_auto_depth, str):
-        auto_depth = raw_auto_depth.strip().lower() not in ("false", "0", "no", "off", "n")
+    if isinstance(raw_auto_depth, bool):
+        auto_depth = raw_auto_depth
+    elif isinstance(raw_auto_depth, str):
+        token = raw_auto_depth.strip().lower()
+        true_tokens = {"true", "1", "yes", "y", "on"}
+        false_tokens = {"false", "0", "no", "n", "off"}
+        if token in true_tokens:
+            auto_depth = True
+        elif token in false_tokens:
+            auto_depth = False
+        else:
+            return [{"error": f"Invalid value for auto_depth: {raw_auto_depth!r}. "
+                              f"Expected one of {sorted(true_tokens | false_tokens)}."}]
     else:
         auto_depth = bool(raw_auto_depth)
 
