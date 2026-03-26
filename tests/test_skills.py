@@ -553,6 +553,24 @@ def test_overlap_breakdown_format(minimal_nsys_conn):
     assert len(text) > 0
 
 
+def test_overlap_breakdown_no_kernels_diagnostic(minimal_nsys_conn):
+    """overlap_breakdown should return enriched error with device diagnostics when device has no kernels."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("overlap_breakdown")
+    # Device 99 doesn't exist — should return diagnostic error, not bare "no kernels"
+    rows = skill.execute(minimal_nsys_conn, device=99)
+    assert isinstance(rows, list)
+    assert len(rows) == 1
+    r = rows[0]
+    assert "error" in r
+    assert r["requested_device"] == 99
+    assert "available_devices" in r
+    assert "hint" in r
+    # Hint should suggest valid device(s)
+    assert "device" in r["hint"].lower()
+
+
 def test_nvtx_layer_breakdown_execute(minimal_nsys_conn):
     """nvtx_layer_breakdown should run against minimal DB without error."""
     from nsys_ai.skills.registry import get_skill
