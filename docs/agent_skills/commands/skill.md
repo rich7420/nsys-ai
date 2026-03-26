@@ -37,9 +37,14 @@ nsys-ai skill run top_kernels profile.sqlite --trim 1.5 3.0   # seconds
 
 ### `nsys-ai skill add <path.md>`
 
-Register a custom skill from a markdown file. The file must contain
-a fenced SQL code block and frontmatter with `name`, `description`, `category`.
-See `skills/SKILL_TEMPLATE.md` for the format.
+Register a custom skill from a markdown file.
+The file must use heading-based format (not YAML frontmatter):
+- `# <name>` — top-level heading with the skill name
+- `## Description` — short summary
+- `## Category` — e.g. `kernels`, `memory`, `custom`
+- `## SQL` — fenced ```sql code block with the query
+
+See `skills/SKILL_TEMPLATE.md` for a complete example.
 
 ### `nsys-ai skill remove <name>`
 
@@ -57,7 +62,10 @@ nsys-ai skill save <name> -o <output.md>
 
 ## Builtin Skills Catalog
 
-All skills support the `--trim` flag for time-range restriction.
+The `--trim` flag is accepted for all skills, but only restricts the analysis window
+for skills whose SQL uses `{trim_clause}` or whose `execute_fn` explicitly reads
+`trim_start_ns`/`trim_end_ns`. Skills like `theoretical_flops`, `speedup_estimator`,
+and `schema_inspect` ignore it.
 Parameters marked **required** must be provided via `--param`.
 
 ---
