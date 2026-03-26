@@ -47,7 +47,34 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
     """
     kernels = prof.kernels(device, trim)
     if not kernels:
-        return {"error": "no kernels"}
+        # Provide diagnostic info so agents can self-correct
+        diag = {"error": "no kernels found"}
+        diag["requested_device"] = device
+        if trim:
+            diag["requested_trim_ns"] = list(trim)
+        # Query available devices with kernel counts
+        try:
+            kernel_tbl = prof.schema.kernel_table
+            dev_rows = prof._duckdb_query(
+                f"SELECT deviceId, COUNT(*) AS cnt FROM {kernel_tbl} GROUP BY deviceId ORDER BY deviceId"
+            )
+            diag["available_devices"] = {r["deviceId"]: r["cnt"] for r in dev_rows}
+            total = sum(r["cnt"] for r in dev_rows)
+            if total > 0 and device not in diag["available_devices"]:
+                diag["hint"] = (
+                    f"Device {device} has no kernels. "
+                    f"Try: {', '.join(f'-p device={d}' for d in sorted(diag['available_devices']))}"
+                )
+            elif total > 0 and trim:
+                diag["hint"] = (
+                    f"Device {device} has {diag['available_devices'].get(device, 0)} kernels "
+                    f"but none in the requested trim window. Try without --trim."
+                )
+            else:
+                diag["hint"] = "Profile contains no GPU kernel data."
+        except Exception:
+            diag["hint"] = "Could not query device info."
+        return diag
 
     # Separate compute vs NCCL intervals
     compute_intervals = []
