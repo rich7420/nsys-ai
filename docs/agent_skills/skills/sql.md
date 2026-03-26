@@ -122,7 +122,7 @@ GROUP BY k.shortName ORDER BY ms DESC LIMIT 20
 
 > **⚠️ PRAGMA is blocked by `query_profile_db`.** The read-only guard rejects PRAGMA
 > statements. Use `DESCRIBE <table>` instead (it is automatically rewritten to
-> `PRAGMA table_info()` internally). Or use the `schema_inspect` builtin skill.
+> `PRAGMA table_info('<table_name>')` internally). Or use the `schema_inspect` builtin skill.
 
 ```sql
 -- All tables in this profile

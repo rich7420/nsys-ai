@@ -73,10 +73,12 @@ nsys-ai report profile.sqlite --gpu 0 --trim 1.0 5.0 -o report.md
 | `nsys-ai agent ask <profile> "<question>"` | Ask a targeted question | Keyword-based skill selection |
 | `nsys-ai skill list` | List all builtin analysis skills | Discover available skills |
 | `nsys-ai skill run <name> <profile> [--param K=V]` | Run a skill against a profile | Targeted analysis |
-| `nsys-ai skill add/remove/save` | Manage custom skills | Extend the skill system |
+| `nsys-ai skill add/remove/save`* | Manage custom skills | Extend the skill system |
 
 > **Builtin Skills Catalog**: See [`commands/skill.md`](commands/skill.md) for the complete
 > list of 21 builtin skills with names, categories, descriptions, and parameters.
+>
+> *\* `skill add` and `skill remove` require `--skills-dir <dir>` or the `NSYS_AI_CUSTOM_SKILLS_DIR` environment variable.*
 
 ### Common agent workflows
 
