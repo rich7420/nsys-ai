@@ -151,7 +151,7 @@ def test_skill_run_duckdb_cache(tmp_path):
     assert isinstance(rows, list)
     assert len(rows) >= 1
     table_names = {r.get("table_name") for r in rows}
-    assert "kernels" in table_names or "CUPTI_ACTIVITY_KIND_KERNEL" in table_names
+    assert "kernels" in table_names
 
     # Verify the DuckDB/Parquet cache was actually built (not the SQLite fallback)
     cache_dir = db_path.with_suffix(".nsys-cache")

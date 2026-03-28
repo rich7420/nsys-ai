@@ -802,7 +802,7 @@ def _cmd_skill(args, _profile):
         save_skill_to_markdown(skill, args.output)
         print(f"Saved '{skill.name}' → {args.output}")
     else:
-        print("Usage: nsys-ai skill {list,run,add,remove,save} ...")
+        print("Usage: nsys-ai skill {list,info,run,add,remove,save} ...")
         sys.exit(1)
 
 
