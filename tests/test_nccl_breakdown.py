@@ -1,6 +1,6 @@
 """Tests for per-stream NCCL breakdown (Issue #24).
 
-Uses the minimal_nsys_conn fixture from conftest.py.
+Uses the minimal_nsys_conn and duckdb_conn fixtures from conftest.py.
 
 Test data recap (from conftest.py):
   Stream 7: nccl_ReduceScatter [4.5-5.5ms] (same-stream anti-pattern)

@@ -19,10 +19,14 @@ Step 1  Confirm NCCL activity + per-stream breakdown:
         dimensions (TP/PP/DP), so per-stream grouping directly reveals
         which parallelism channel dominates communication cost.
 
-        Alternatively, raw SQL:
+        Alternatively, example raw SQL (schema may vary):
+        -- NOTE: The kernel table name may be CUPTI_ACTIVITY_KIND_KERNEL,
+        --       CUPTI_ACTIVITY_KIND_KERNEL_V2/V3, etc. Run a schema
+        --       inspection (e.g., SELECT name FROM sqlite_master WHERE type='table';)
+        --       to find the actual kernel table name and substitute it below.
         SELECT k.streamId, s.value AS op, COUNT(*) AS cnt,
                SUM(k.[end]-k.start)/1e6 AS total_ms
-        FROM CUPTI_ACTIVITY_KIND_KERNEL k JOIN StringIds s ON k.shortName=s.id
+        FROM <KERNEL_TABLE> k JOIN StringIds s ON k.shortName=s.id
         WHERE LOWER(s.value) LIKE '%nccl%'
         GROUP BY k.streamId, op ORDER BY k.streamId, total_ms DESC LIMIT 20
 
