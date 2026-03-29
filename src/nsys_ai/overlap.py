@@ -147,12 +147,17 @@ def nccl_breakdown(prof: Profile, device: int, trim: tuple[int, int] | None = No
         dur_ns = k["end"] - k["start"]
         by_stream_type[(k["streamId"], ctype)].append(dur_ns)
 
+    # Precompute totals to avoid redundant sum() during sort
+    computed_groups = [
+        (stream_id, ctype, sum(durs), durs)
+        for (stream_id, ctype), durs in by_stream_type.items()
+    ]
+
     result = []
-    for (stream_id, ctype), durs in sorted(
-        by_stream_type.items(),
-        key=lambda x: (x[0][0], -sum(x[1])),  # stream asc, total desc
+    for stream_id, ctype, total, durs in sorted(
+        computed_groups,
+        key=lambda x: (x[0], -x[2]),  # stream asc, total desc
     ):
-        total = sum(durs)
         result.append(
             {
                 "stream_id": stream_id,

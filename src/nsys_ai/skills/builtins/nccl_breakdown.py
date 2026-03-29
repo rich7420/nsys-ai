@@ -26,7 +26,19 @@ def _execute(conn, **kwargs):
 def _format(rows):
     from ...overlap import format_nccl
 
-    return format_nccl(rows)
+    base = format_nccl(rows)
+
+    # Add a brief diagnostic hint when no NCCL collectives are present.
+    # This mirrors the previous, more actionable behavior while still
+    # delegating core formatting to the shared overlap engine.
+    if not rows:
+        hint = (
+            "\n\nHint: This usually means either the profile was captured on a "
+            "single GPU, or that NCCL communication was not recorded for this run."
+        )
+        return f"{base}{hint}"
+
+    return base
 
 
 SKILL = Skill(
