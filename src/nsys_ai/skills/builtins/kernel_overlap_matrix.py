@@ -29,7 +29,8 @@ def _query_memcpy(prof, device, trim):
         ):
             memcpy_table = t
             break
-    if memcpy_table is None:
+    import re
+    if memcpy_table is None or not re.match(r"^[A-Za-z0-9_]+$", memcpy_table):
         return []
 
     sql = f"""\
@@ -46,9 +47,9 @@ WHERE deviceId = ?"""
 
 def _execute(conn, **kwargs):
     from ...overlap import (
-        _intersection_coverage,
-        _merge_intervals,
-        _total_covered,
+        intersection_coverage,
+        merge_intervals,
+        total_covered,
         classify_kernel,
     )
     from ...profile import Profile
@@ -80,18 +81,18 @@ def _execute(conn, **kwargs):
         categories[cat].append((r["start"], r["end"]))
 
     # 3. Merge intervals within each category
-    merged = {cat: _merge_intervals(ivs) for cat, ivs in categories.items()}
+    merged = {cat: merge_intervals(ivs) for cat, ivs in categories.items()}
 
     # 4. Compute diagonal (self-time) and pairwise overlap
     cats = sorted(merged.keys())
-    self_time = {cat: _total_covered(merged[cat]) for cat in cats}
+    self_time = {cat: total_covered(merged[cat]) for cat in cats}
 
     # Upper triangle pairwise overlap
     pairwise = {}
     for i, a in enumerate(cats):
         for j in range(i + 1, len(cats)):
             b = cats[j]
-            overlap_ns = _intersection_coverage(merged[a], merged[b])
+            overlap_ns = intersection_coverage(merged[a], merged[b])
             pairwise[(a, b)] = overlap_ns
 
     # 5. Build result rows (upper triangle including diagonal)
