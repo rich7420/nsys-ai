@@ -1,7 +1,7 @@
 """Kernel overlap matrix — pairwise overlap between kernel categories.
 
 Computes comm×comm and comm×compute overlap matrices.
-Includes memcpy (H2D/D2H/D2D) for data-movement contention analysis.
+Includes memcpy (H2D/D2H/D2D/P2P) for data-movement contention analysis.
 
 This is a Python-level skill (execute_fn) because it needs interval
 merge and intersection logic that can't be expressed in a single SQL query.
