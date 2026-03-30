@@ -115,6 +115,8 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
         "overlap_pct": round(100 * overlap_ns / nccl_ns, 1) if nccl_ns else 0,
         "compute_kernels": len(compute_intervals),
         "nccl_kernels": len(nccl_intervals),
+        "span_start_ns": span_start,
+        "span_end_ns": span_end,
     }
 
 
@@ -359,6 +361,8 @@ def detect_iterations(
             {
                 "iteration": i,
                 "text": it["text"] if "text" in it else "",
+                "gpu_start_ns": gpu_start,
+                "gpu_end_ns": gpu_end,
                 "gpu_start_s": round(gpu_start / 1e9, 4),
                 "gpu_end_s": round(gpu_end / 1e9, 4),
                 "duration_ms": round((gpu_end - gpu_start) / 1e6, 2),

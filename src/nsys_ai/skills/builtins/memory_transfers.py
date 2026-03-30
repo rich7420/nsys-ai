@@ -1,6 +1,6 @@
 """Memory transfer summary — H2D, D2H, D2D, P2P breakdown."""
 
-from ..base import Skill
+from ..base import Skill, SkillParam
 
 _COPY_KINDS = {1: "H2D", 2: "D2H", 8: "D2D", 10: "P2P"}
 
@@ -44,7 +44,7 @@ ORDER BY total_ms DESC""",
 )
 
 
-def _classify_h2d_pattern(rows: list[dict]) -> dict:
+def _classify_h2d_pattern(rows: list, kwargs: dict | None = None) -> dict:
     """Classify H2D transfer distribution into init_heavy / spread_out / spike."""
     if not rows:
         return {"_pattern": True, "type": "none", "detail": "No H2D transfers"}
@@ -74,6 +74,7 @@ def _classify_h2d_pattern(rows: list[dict]) -> dict:
         spikes = [r for r in rows if r["total_mb"] > 3 * median_mb]
         if spikes:
             spike_secs = ", ".join(str(r["second"]) for r in spikes[:5])
+            gpu_id = kwargs.get("device", 0) if kwargs else 0
             return {
                 "_pattern": True,
                 "type": "spike",
@@ -83,6 +84,8 @@ def _classify_h2d_pattern(rows: list[dict]) -> dict:
                     f"Check timeline at those timestamps for unexpected data movement."
                 ),
                 "spike_seconds": [r["second"] for r in spikes],
+                "spikes": [{"second": r["second"], "total_mb": r["total_mb"], "window_start": r.get("window_start"), "window_end": r.get("window_end")} for r in spikes],
+                "gpu_id": gpu_id,
             }
 
     # Spread-out: transfers happen across many seconds
@@ -139,25 +142,60 @@ H2D_DIST_SKILL = Skill(
         "and continuous data feeding in the training/inference loop."
     ),
     category="memory",
+    params=[
+        SkillParam("device", "GPU device ID", "int", False, 0)
+    ],
     sql="""\
 WITH baseline AS (
     SELECT MIN(k.start) AS min_start
     FROM {memcpy_table} k
-    WHERE k.copyKind = 1 {trim_clause}
+    WHERE k.copyKind = 1 AND k.deviceId = {device} {trim_clause}
 )
 SELECT
     CAST((k.start - b.min_start) / 1000000000.0 AS INT) AS second,
     COUNT(*) AS ops,
     SUM(k.bytes) / 1e6 AS total_mb,
-    COALESCE(SUM(k.bytes) / NULLIF(SUM(k.[end] - k.start), 0), 0) * 1e9 / 1e9 AS avg_gbps
+    COALESCE(SUM(k.bytes) / NULLIF(SUM(k.[end] - k.start), 0), 0) * 1e9 / 1e9 AS avg_gbps,
+    MIN(k.start) AS window_start,
+    MAX(k.[end]) AS window_end
 FROM {memcpy_table} k CROSS JOIN baseline b
-WHERE k.copyKind = 1 {trim_clause}
+WHERE k.copyKind = 1 AND k.deviceId = {device} {trim_clause}
 GROUP BY 1
 ORDER BY 1""",
     format_fn=_format_dist,
     tags=["memory", "transfer", "H2D", "distribution", "time", "leak"],
 )
 
+def _to_findings_dist(rows: list[dict]) -> list:
+    from nsys_ai.annotation import Finding
+    findings = []
+
+    pattern = next((r for r in rows if r.get("_pattern")), None)
+    if not pattern:
+        return findings
+
+    if pattern.get("type") == "spike":
+        # Cap at top 5 spikes by size to avoid unbounded findings on long profiles.
+        spikes = sorted(pattern.get("spikes", []), key=lambda s: s.get("total_mb", 0), reverse=True)[:5]
+        for spike in spikes:
+            start = spike.get("window_start")
+            end = spike.get("window_end")
+            if start is not None and end is not None and end > start:
+                findings.append(
+                    Finding(
+                        type="region",
+                        label=f"H2D Spike ({spike['total_mb']:.1f}MB)",
+                        start_ns=start,
+                        end_ns=end,
+                        gpu_id=pattern.get("gpu_id", 0),
+                        severity="warning",
+                        note=f"Spike at second {spike['second']}: {spike['total_mb']:.1f}MB transferred",
+                    )
+                )
+    return findings
+
+
+H2D_DIST_SKILL.to_findings_fn = _to_findings_dist
 
 # Replace the direct SQL with a safe execute_fn for the module
 def _execute_h2d_dist(conn, **kwargs):
@@ -177,6 +215,7 @@ def _execute_h2d_dist(conn, **kwargs):
         title=H2D_DIST_SKILL.title,
         description=H2D_DIST_SKILL.description,
         category=H2D_DIST_SKILL.category,
+        params=H2D_DIST_SKILL.params,
         sql=H2D_DIST_SKILL.sql,
         format_fn=H2D_DIST_SKILL.format_fn,
         tags=getattr(H2D_DIST_SKILL, "tags", None),
@@ -193,7 +232,7 @@ def _execute_h2d_dist(conn, **kwargs):
 
     # Append pattern classification as metadata
     if rows:
-        rows.append(_classify_h2d_pattern(rows))
+        rows.append(_classify_h2d_pattern(rows, kwargs))
     return rows
 
 

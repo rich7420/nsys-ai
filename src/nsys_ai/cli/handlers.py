@@ -555,6 +555,70 @@ def _cmd_chat(args, _profile):
     run_chat_tui(args.profile)
 
 
+def _cmd_evidence(args, _profile):
+    """Build evidence findings via EvidenceBuilder for timeline overlay."""
+    import json
+
+    from nsys_ai.evidence_builder import EvidenceBuilder
+
+    if getattr(args, "evidence_action", None) != "build":
+        print("Usage: nsys-ai evidence build <profile.sqlite> [--format json|text] [--analyzers a,b,c]")
+        return
+
+    with _profile.open(args.profile) as prof:
+        trim = None
+        if getattr(args, "trim", None):
+            trim = (int(args.trim[0] * 1e9), int(args.trim[1] * 1e9))
+
+        device = getattr(args, "gpu", 0) or 0
+        builder = EvidenceBuilder(prof, device=device, trim=trim)
+
+        analyzers_raw = getattr(args, "analyzers", None)
+        if analyzers_raw:
+            only_analyzers = [name for name in (part.strip() for part in analyzers_raw.split(",")) if name]
+            report = builder.build(only=only_analyzers) if only_analyzers else builder.build()
+        else:
+            report = builder.build()
+
+        findings = [f.to_dict() for f in report.findings]
+        fmt = getattr(args, "format", "json")
+        if fmt == "json":
+            out_report = {
+                "title": getattr(report, "title", "Evidence Report"),
+                "profile_path": getattr(report, "profile_path", args.profile),
+                "findings": findings
+            }
+            print(json.dumps(out_report, indent=2))
+        else:
+            sev_icons = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
+            print(f"── Evidence Findings ({len(findings)}) ──")
+            for f in report.findings:
+                icon = sev_icons.get(f.severity, "⚪")
+                dur_ms = (f.end_ns - f.start_ns) / 1e6 if f.end_ns else 0
+                print(f"  {icon} [{f.type}] {f.label}  ({dur_ms:.1f}ms)")
+                if f.note:
+                    print(f"      {f.note}")
+
+        out = getattr(args, "output", None)
+        if out:
+            from nsys_ai.annotation import save_findings
+
+            out_dir = os.path.dirname(out)
+            if out_dir and not os.path.exists(out_dir):
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except OSError as e:
+                    print(f"Error: Failed to create output directory '{out_dir}': {e}", file=sys.stderr, flush=True)
+                    sys.exit(1)
+
+            try:
+                save_findings(report, out)
+            except OSError as e:
+                print(f"Error: Failed to write findings to '{out}': {e}", file=sys.stderr, flush=True)
+                sys.exit(1)
+            print(f"Saved {len(findings)} finding(s) → {out}", flush=True, file=sys.stderr)
+
+
 def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
     """Truncate JSON rows array if it exceeds max_rows. Preserves original total count."""
     if max_rows < 0:
@@ -661,6 +725,64 @@ def _cmd_skill(args, _profile):
         if trim:
             trim_kwargs["trim_start_ns"] = int(trim[0] * 1e9)
             trim_kwargs["trim_end_ns"] = int(trim[1] * 1e9)
+
+        # Resolve --iteration N to trim range (conflicts with --trim)
+        iteration_n = getattr(args, "iteration", None)
+        if iteration_n is not None:
+            if trim:
+                print("Error: --iteration and --trim cannot be used together", file=sys.stderr)
+                sys.exit(1)
+            from nsys_ai.overlap import detect_iterations
+            from nsys_ai.profile import Profile
+
+            prof_iter = Profile._from_conn(conn)
+            marker = getattr(args, "marker", "sample_0")
+
+            # Extract device from raw params (if provided via -p device=<n>)
+            device = 0
+            for p in getattr(args, "param", []):
+                if not p.startswith("device"):
+                    continue
+                key, sep, value = p.partition("=")
+                if sep == "" or not value:
+                    print(
+                        "Error: --param device requires a value, e.g. -p device=0",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                try:
+                    device = int(value)
+                except ValueError:
+                    print(
+                        f"Error: --param device must be an integer, got '{value}'",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+            iters = detect_iterations(prof_iter, device, marker=marker)
+            if not iters:
+                print(
+                    "Error: no iterations detected. This can occur if NVTX markers do not match, "
+                    "the selected device has no kernel activity, or runtime/NVTX data is missing. "
+                    f"(device={device}, marker={marker})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if iteration_n < 0 or iteration_n >= len(iters):
+                print(
+                    f"Error: iteration {iteration_n} out of range (0-{len(iters) - 1})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            it = iters[iteration_n]
+            # Prefer nanosecond fields if available; fall back to seconds -> ns conversion.
+            if "gpu_start_ns" in it and "gpu_end_ns" in it:
+                trim_kwargs["trim_start_ns"] = int(it["gpu_start_ns"])
+                trim_kwargs["trim_end_ns"] = int(it["gpu_end_ns"])
+            else:
+                # gpu_start_s / gpu_end_s are in SECONDS -> convert to ns
+                trim_kwargs["trim_start_ns"] = int(it["gpu_start_s"] * 1e9)
+                trim_kwargs["trim_end_ns"] = int(it["gpu_end_s"] * 1e9)
 
         # Parse --param KEY=VALUE pairs into validated, typed kwargs
         param_kwargs = {}
@@ -925,8 +1047,15 @@ You execute analysis dynamically via the CLI:
 ```bash
 nsys-ai info <profile.sqlite>                                      # quick metadata
 nsys-ai skill run <skill_name> <profile.sqlite> --format json [-p PARAM=VALUE]
+nsys-ai skill run <skill_name> <profile.sqlite> --format json --iteration N  # auto-trim to iter N
+nsys-ai evidence build <profile.sqlite> --format json              # generate findings.json
 ```
-Example: `nsys-ai skill run top_kernels baseline.sqlite --format json -p limit=5`
+Examples:
+- `nsys-ai skill run top_kernels baseline.sqlite --format json -p limit=5`
+- `nsys-ai skill run kernel_instances baseline.sqlite --format json -p name=flash -p limit=3`  (get ns timestamps)
+- `nsys-ai skill run iteration_detail baseline.sqlite --format json -p iteration=3`  (drill into slow iter)
+- `nsys-ai evidence build baseline.sqlite --format json -o /tmp/findings.json`  (auto-generate evidence)
+- `nsys-ai timeline-web baseline.sqlite --findings /tmp/findings.json`  (visualize findings)
 """
     print(guide)
     print(skill_catalog())

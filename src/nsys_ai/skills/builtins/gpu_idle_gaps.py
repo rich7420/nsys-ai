@@ -85,6 +85,7 @@ def _execute_inner(conn: sqlite3.Connection, **kwargs):
     gap_sql = f"""\
 WITH ordered AS (
     SELECT k.streamId,
+           k.deviceId,
            k.start, k.[end],
            s.value AS kernel_name,
            LAG(k.[end]) OVER (PARTITION BY k.deviceId, k.streamId ORDER BY k.start) AS prev_end,
@@ -94,6 +95,7 @@ WITH ordered AS (
     WHERE k.deviceId = ? {trim_clause}
 )
 SELECT streamId,
+       deviceId,
        prev_end AS start_ns,
        start AS end_ns,
        (start - prev_end) AS gap_ns,
@@ -193,6 +195,9 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
         "gaps_1_5ms": agg.get("gaps_1_5ms") or 0,
         "gaps_5_50ms": agg.get("gaps_5_50ms") or 0,
         "gaps_gt50ms": agg.get("gaps_gt50ms") or 0,
+        "profile_start_ns": time_range[0] if time_range else None,
+        "profile_end_ns": time_range[1] if time_range else None,
+        "gpu_id": device,
     }
 
     # --- Phase 3: CPU attribution for top 5 gaps ---
@@ -290,6 +295,66 @@ def _format(rows):
     return "\n".join(lines)
 
 
+def _to_findings(rows: list[dict]) -> list:
+    from nsys_ai.annotation import Finding
+
+    findings = []
+
+    for r in rows:
+        if r.get("error"):
+            continue
+
+        if r.get("_summary"):
+            pct = r.get("pct_of_profile", 0)
+            target_device = r.get("gpu_id", 0)
+            profile_start_ns = r.get("profile_start_ns")
+            profile_end_ns = r.get("profile_end_ns")
+
+            if (
+                pct > 5
+                and profile_start_ns is not None
+                and profile_end_ns is not None
+                and profile_end_ns > profile_start_ns
+            ):
+                findings.append(
+                    Finding(
+                        type="region",
+                        label=f"GPU Idle Summary ({pct}% of profile)",
+                        start_ns=profile_start_ns,
+                        end_ns=profile_end_ns,
+                        gpu_id=target_device,
+                        severity="info" if pct < 15 else "warning",
+                        note=(
+                            f"Total: {r.get('total_idle_ms', 0):.1f}ms idle across "
+                            f"{r.get('gap_count', 0)} gaps ({pct}% of profiled span)"
+                        ),
+                    )
+                )
+            continue
+
+        gap_ms = r["gap_ns"] / 1e6
+        note = f"Stream {r['streamId']}: {gap_ms:.2f}ms idle"
+        attr = r.get("attribution", {})
+        if attr and attr.get("top_apis"):
+            api = attr["top_apis"][0]
+            api_name = api["name"].split("_v")[0]
+            note += f" — CPU: {api_name} ({api['total_ms']:.1f}ms)"
+
+        findings.append(
+            Finding(
+                type="region",
+                label=f"GPU Idle Gap ({gap_ms:.2f}ms)",
+                start_ns=r["start_ns"],
+                end_ns=r["end_ns"],
+                gpu_id=r.get("deviceId", 0),
+                stream=str(r["streamId"]),
+                severity="warning",
+                note=note,
+            )
+        )
+    return findings
+
+
 SKILL = Skill(
     name="gpu_idle_gaps",
     title="GPU Idle Gaps (Bubbles)",
@@ -308,5 +373,6 @@ SKILL = Skill(
         SkillParam("device", "GPU device ID (default 0)", "int", False, 0),
     ],
     format_fn=_format,
+    to_findings_fn=_to_findings,
     tags=["bubble", "idle", "gap", "pipeline", "stall", "utilization", "attribution"],
 )
