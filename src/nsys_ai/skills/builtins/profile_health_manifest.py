@@ -43,11 +43,23 @@ def _execute(conn, **kwargs):
 
     # ── 1. Profile metadata ──────────────────────────────────────
     prof = Profile._from_conn(conn)
-    from ...profile import get_first_gpu_name
-    # NOTE: get_first_gpu_name returns the GPU name for cudaId=0.
-    # On multi-GPU nodes with identical GPUs this is fine; for
-    # heterogeneous setups the caller should interpret accordingly.
-    gpu_name = get_first_gpu_name(conn) or "unknown"
+    # Prefer the GPU name for the requested device, if available.
+    gpu_name = "unknown"
+    gpu_info = getattr(prof.meta, "gpu_info", None)
+    if gpu_info is not None:
+        device_info = None
+        # Support both dict- and list-like gpu_info containers.
+        if isinstance(gpu_info, dict):
+            device_info = gpu_info.get(device)
+        elif isinstance(gpu_info, list) and device < len(gpu_info):
+            device_info = gpu_info[device]
+        if device_info is not None:
+            gpu_name = getattr(device_info, "name", "unknown")
+            
+    # Fallback if device info is missing/empty
+    if not gpu_name or gpu_name == "unknown":
+        from ...profile import get_first_gpu_name
+        gpu_name = get_first_gpu_name(conn) or "unknown"
     start_ns, end_ns = prof.meta.time_range
     # Use the trim window (if provided), clamped to the profile range,
     # so the reported span matches the analysis window used by sub-skills.
@@ -65,25 +77,30 @@ def _execute(conn, **kwargs):
     profile_span_ms = round(profile_span_ns / 1e6, 1) if profile_span_ns > 0 else 0
 
     # ── 2. Top kernels (compact: top 5 only) ─────────────────────
-    top_k_rows = _safe_skill_run(
-        "top_kernels", conn, limit=5, device=device, **trim_kwargs
-    )
+    trim_tuple = None
+    if trim_kwargs.get("trim_start_ns") is not None and trim_kwargs.get("trim_end_ns") is not None:
+        trim_tuple = (trim_kwargs["trim_start_ns"], trim_kwargs["trim_end_ns"])
+
+    try:
+        # Use aggregate_kernels for correct device filtering
+        agg_kernels = prof.aggregate_kernels(device=device, trim=trim_tuple, limit=None)
+    except Exception as exc:
+        _log.debug("manifest: aggregate_kernels failed: %s", exc, exc_info=True)
+        agg_kernels = []
+
     top_kernels = []
-    for r in top_k_rows[:5]:
-        name = r.get("kernel_name", "?")
+    for r in agg_kernels[:5]:
+        name = r.get("demangled", "?")
         if len(name) > 60:
             name = name[:57] + "..."
         top_kernels.append({
             "name": name,
-            "total_ms": r.get("total_ms", 0),
-            "count": r.get("invocations", 0),
+            "total_ms": round(r.get("total_ns", 0) / 1e6, 2),
+            "count": r.get("count", 0),
         })
 
-    # Compute total kernel time over all kernels, not just the top 5.
-    all_kernel_rows = _safe_skill_run(
-        "top_kernels", conn, device=device, **trim_kwargs
-    )
-    total_kernel_ms = sum(r.get("total_ms", 0) for r in all_kernel_rows)
+    # Compute total kernel time over all kernels
+    total_kernel_ms = sum(r.get("total_ns", 0) for r in agg_kernels) / 1e6
 
     # ── 3. Compute/NCCL overlap ──────────────────────────────────
     overlap_rows = _safe_skill_run(
@@ -113,7 +130,7 @@ def _execute(conn, **kwargs):
     if nccl_rows:
         stream_ids = {r.get("stream_id") for r in nccl_rows}
         nccl_summary["streams"] = len(stream_ids)
-        nccl_summary["collectives"] = len(nccl_rows)
+        nccl_summary["collectives"] = sum(r.get("count", 1) for r in nccl_rows)
         # Dominant collective by total_ms
         dominant = max(nccl_rows, key=lambda r: r.get("total_ms", 0))
         nccl_summary["dominant_type"] = dominant.get("type", "?")
@@ -214,9 +231,18 @@ def _format(rows):
     if ov:
         lines.append("")
         lines.append("  Compute/NCCL Overlap:")
-        lines.append(f"    Compute only: {ov.get('compute_only_ms', 0):.1f}ms")
-        lines.append(f"    NCCL only:    {ov.get('nccl_only_ms', 0):.1f}ms")
-        lines.append(f"    Overlap:      {ov.get('overlap_pct', 0)}%")
+        err = ov.get("error")
+        if err:
+            # Preserve and surface overlap computation errors instead of showing 0.0ms metrics.
+            if isinstance(err, dict):
+                msg = err.get("message") or str(err)
+            else:
+                msg = str(err)
+            lines.append(f"    ERROR: {msg}")
+        else:
+            lines.append(f"    Compute only: {ov.get('compute_only_ms', 0):.1f}ms")
+            lines.append(f"    NCCL only:    {ov.get('nccl_only_ms', 0):.1f}ms")
+            lines.append(f"    Overlap:      {ov.get('overlap_pct', 0)}%")
 
     # NCCL
     nccl = m.get("nccl", {})

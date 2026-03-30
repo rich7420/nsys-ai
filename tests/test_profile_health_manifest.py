@@ -105,6 +105,7 @@ class TestMaxRowsTruncation:
 
         # Simulate truncation logic from handlers.py
         max_rows = 3
+        assert len(rows) > max_rows, "Fixture must return > max_rows for test to be valid"
         if len(rows) > max_rows:
             total = len(rows)
             truncated = rows[:max_rows]

@@ -329,8 +329,9 @@ def _register_legacy_commands(sub):
         default=None,
         metavar="N",
         help=(
-            "Truncate JSON output to at most N rows (for token budget control). "
-            "Appends a _truncated metadata entry when rows are clipped."
+            "Truncate JSON output to at most N data rows (for token budget control). "
+            "When rows are clipped, a final _truncated metadata entry is appended (so "
+            "the array may contain N+1 items)."
         ),
     )
     sp_add = skill_sub.add_parser("add", help="Add a custom skill from .md file")
