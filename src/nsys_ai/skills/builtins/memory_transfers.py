@@ -175,7 +175,9 @@ def _to_findings_dist(rows: list[dict]) -> list:
         return findings
 
     if pattern.get("type") == "spike":
-        for spike in pattern.get("spikes", []):
+        # Cap at top 5 spikes by size to avoid unbounded findings on long profiles.
+        spikes = sorted(pattern.get("spikes", []), key=lambda s: s.get("total_mb", 0), reverse=True)[:5]
+        for spike in spikes:
             start = spike.get("window_start")
             end = spike.get("window_end")
             if start is not None and end is not None and end > start:
