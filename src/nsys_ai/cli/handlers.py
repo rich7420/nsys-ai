@@ -555,6 +555,26 @@ def _cmd_chat(args, _profile):
     run_chat_tui(args.profile)
 
 
+def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
+    """Truncate JSON rows array if it exceeds max_rows. Preserves original total count."""
+    if max_rows < 0:
+        raise ValueError("--max-rows must be a non-negative integer")
+    # Preserve error payloads even if max_rows is 0.
+    if len(rows) == 1 and isinstance(rows[0], dict) and "error" in rows[0]:
+        return rows
+    if len(rows) > max_rows:
+        total = len(rows)
+        # Convert to list to ensure we don't mutate an original view/tuple
+        truncated = list(rows[:max_rows])
+        truncated.append({
+            "_truncated": True,
+            "_total_rows": total,
+            "_shown_rows": max_rows,
+        })
+        return truncated
+    return rows
+
+
 def _cmd_skill(args, _profile):
     import json as _json
 
@@ -703,6 +723,16 @@ def _cmd_skill(args, _profile):
                         available=[s.name for s in all_skills()],
                     )
                 rows = skill.execute(conn, **full_kwargs)
+
+                # Token budget protection: truncate rows if --max-rows set
+                max_rows = getattr(args, "max_rows", None)
+                if max_rows is not None and isinstance(rows, list):
+                    try:
+                        rows = _apply_max_rows_truncation(rows, max_rows)
+                    except ValueError as exc:
+                        print(f"Error: {exc}", file=sys.stderr)
+                        sys.exit(1)
+
                 print(_json.dumps(rows, indent=2))
             else:
                 print(_run_skill(args.skill_name, conn, **full_kwargs))
@@ -875,6 +905,10 @@ Subsequent runs on the same profile are faster (~10-30s). Plan your tool calls a
 3. **MANDATORY**: Correlate findings with local Python source code (via grep/find) to provide line-level recommendations.
 
 ## The 6-Stage Top-Down Triage Workflow
+0. **Quick Start**: Run `nsys-ai skill run profile_health_manifest <profile> --format json` first.
+   This returns GPU info, top kernels, overlap stats, NCCL breakdown, idle gaps, and root cause
+   findings in ONE call. Use this to decide which stage to drill into.
+   For token budget control, use `--max-rows N` on any skill to cap JSON output rows.
 1. **Orient**: Run `nsys-ai info <profile>` for quick metadata (GPU name, kernel count, time range).
    Then run `nsys-ai skill run schema_inspect <profile>` to see available tables.
 2. **Temporal Breakdown**: Check utilization and bubbles (`gpu_idle_gaps`, `top_kernels`).
