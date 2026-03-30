@@ -7,7 +7,6 @@ import pytest
 
 from nsys_ai.skills.registry import get_skill
 
-
 # ── Fixtures ──────────────────────────────────────────────────────
 
 
