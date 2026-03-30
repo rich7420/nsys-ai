@@ -29,7 +29,13 @@ def _execute(conn, **kwargs):
     # 1. Get all iterations
     iters = detect_iterations(prof, device, trim=trim, marker=marker)
     if not iters:
-        return [{"error": "No iterations detected (NVTX marker not found)"}]
+        return [{
+            "error": (
+                "No iterations detected. This can occur if NVTX markers do not match, "
+                "the selected device has no kernel activity, or runtime/NVTX data is missing. "
+                f"(device={device}, marker={marker})"
+            )
+        }]
     if iteration < 0 or iteration >= len(iters):
         return [{"error": f"Iteration {iteration} out of range (0-{len(iters) - 1})"}]
 

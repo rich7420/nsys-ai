@@ -727,12 +727,34 @@ def _cmd_skill(args, _profile):
             marker = getattr(args, "marker", "sample_0")
 
             # Extract device from raw params (if provided via -p device=<n>)
-            device_val = next((p.split("=")[1] for p in getattr(args, "param", []) if p.startswith("device=")), "0")
-            device = int(device_val) if device_val.isdigit() else 0
+            device = 0
+            for p in getattr(args, "param", []):
+                if not p.startswith("device"):
+                    continue
+                key, sep, value = p.partition("=")
+                if sep == "" or not value:
+                    print(
+                        "Error: --param device requires a value, e.g. -p device=0",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                try:
+                    device = int(value)
+                except ValueError:
+                    print(
+                        f"Error: --param device must be an integer, got '{value}'",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
 
             iters = detect_iterations(prof_iter, device, marker=marker)
             if not iters:
-                print("Error: no iterations detected (NVTX marker not found)", file=sys.stderr)
+                print(
+                    "Error: no iterations detected. This can occur if NVTX markers do not match, "
+                    "the selected device has no kernel activity, or runtime/NVTX data is missing. "
+                    f"(device={device}, marker={marker})",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
             if iteration_n < 0 or iteration_n >= len(iters):
                 print(
