@@ -95,7 +95,7 @@ class TestManifestDuckDB:
 class TestMaxRowsTruncation:
     def test_truncation_applied(self):
         from nsys_ai.cli.handlers import _apply_max_rows_truncation
-        
+
         rows = [{"id": i} for i in range(10)]
         max_rows = 3
         truncated = _apply_max_rows_truncation(rows, max_rows)
@@ -106,7 +106,7 @@ class TestMaxRowsTruncation:
 
     def test_no_truncation_when_under_limit(self):
         from nsys_ai.cli.handlers import _apply_max_rows_truncation
-        
+
         rows = [{"id": i} for i in range(3)]
         truncated = _apply_max_rows_truncation(rows, 100)
         assert len(truncated) == 3
@@ -114,7 +114,7 @@ class TestMaxRowsTruncation:
 
     def test_negative_max_rows_raises(self):
         from nsys_ai.cli.handlers import _apply_max_rows_truncation
-        
+
         rows = [{"id": i} for i in range(3)]
         with pytest.raises(ValueError, match="non-negative integer"):
             _apply_max_rows_truncation(rows, -1)
