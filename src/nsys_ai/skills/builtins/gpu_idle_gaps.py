@@ -296,12 +296,11 @@ def _to_findings(rows: list[dict]) -> list:
     from nsys_ai.annotation import Finding
 
     findings = []
-    summary = next((r for r in rows if r.get("_summary")), None)
 
     for r in rows:
         if r.get("error"):
             continue
-            
+
         if r.get("_summary"):
             pct = r.get("pct_of_profile", 0)
             if pct > 5 and r.get("profile_start_ns") and r.get("profile_end_ns"):
@@ -320,7 +319,7 @@ def _to_findings(rows: list[dict]) -> list:
                     )
                 )
             continue
-            
+
         gap_ms = r["gap_ns"] / 1e6
         note = f"Stream {r['streamId']}: {gap_ms:.2f}ms idle"
         attr = r.get("attribution", {})
@@ -331,7 +330,7 @@ def _to_findings(rows: list[dict]) -> list:
 
         findings.append(
             Finding(
-                type="region", 
+                type="region",
                 label=f"GPU Idle Gap ({gap_ms:.2f}ms)",
                 start_ns=r["start_ns"],
                 end_ns=r["end_ns"],

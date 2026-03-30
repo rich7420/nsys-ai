@@ -164,7 +164,7 @@ ORDER BY 1""",
 def _to_findings_dist(rows: list[dict]) -> list:
     from nsys_ai.annotation import Finding
     findings = []
-    
+
     pattern = next((r for r in rows if r.get("_pattern")), None)
     if not pattern:
         return findings

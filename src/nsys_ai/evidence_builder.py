@@ -6,7 +6,6 @@ to produce findings with exact nanosecond timestamps for timeline overlay.
 """
 
 import logging
-import statistics
 
 from .annotation import EvidenceReport, Finding
 from .profile import Profile
@@ -61,7 +60,7 @@ class EvidenceBuilder:
         for analyzer_name, (skill_name, params) in self._SKILL_PIPELINE.items():
             if only is not None and analyzer_name not in only:
                 continue
-                
+
             try:
                 skill = get_skill(skill_name)
                 # Map runtime parameters into skill args
@@ -69,7 +68,7 @@ class EvidenceBuilder:
                 if self.trim:
                     kwargs["trim_start_ns"] = self.trim[0]
                     kwargs["trim_end_ns"] = self.trim[1]
-                
+
                 # Use DuckDB if available, fallback to SQLite
                 conn = self.prof.db if self.prof.db is not None else self.prof.conn
                 rows = skill.execute(conn, **kwargs)
@@ -80,7 +79,7 @@ class EvidenceBuilder:
                 print(f"FAILED TO RUN {analyzer_name}: {e}")
                 traceback.print_exc()
                 _log.debug("Analyzer %s (skill %s) failed", analyzer_name, skill_name, exc_info=True)
-                
+
         return EvidenceReport(
             title="Auto-Analysis",
             profile_path=getattr(self.prof, "path", ""),

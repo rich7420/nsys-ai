@@ -23,7 +23,9 @@ _COPY_KIND_NAMES = {
 
 def _execute(conn, **kwargs):
     import sqlite3
+
     import duckdb
+
     from ...profile import Profile
     from ...sql_compat import sqlite_to_duckdb
 
@@ -86,7 +88,7 @@ WHERE deviceId = ? AND bytes > 10000000
 """ + (" AND [end] >= ? AND start <= ? " if trim else "") + f"""
 ORDER BY dur_ns DESC
 LIMIT {limit}"""
-    
+
     anomalies = []
     try:
         cur = conn.execute(sqlite_to_duckdb(anomaly_sql), [device] + trim_params)

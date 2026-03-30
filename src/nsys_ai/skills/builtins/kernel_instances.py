@@ -84,7 +84,7 @@ def _to_findings(rows: list[dict]) -> list:
     for r in rows:
         if "error" in r:
             continue
-        
+
         name = r.get("short_name") or r.get("kernel_name", "?")
         is_nccl = "nccl" in name.lower()
         dur_ms = r.get("duration_ms", 0.0)

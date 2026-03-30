@@ -29,20 +29,21 @@ def _execute(conn, **kwargs):
 
 def _to_findings(rows: list[dict]) -> list:
     import statistics
+
     from nsys_ai.annotation import Finding
-    
+
     findings = []
     if len(rows) < 3:
         return findings
-        
+
     durs = [it["duration_ms"] for it in rows if "duration_ms" in it]
     if not durs:
         return findings
-        
+
     med = statistics.median(durs)
     if med <= 0:
         return findings
-        
+
     for it in rows:
         if it.get("duration_ms", 0) > 1.5 * med:
             pct = 100 * it["duration_ms"] / med

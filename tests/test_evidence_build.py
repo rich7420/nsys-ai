@@ -1,6 +1,5 @@
 """Tests for evidence build CLI and EvidenceBuilder.only parameter."""
 
-import pytest
 
 from nsys_ai.evidence_builder import EvidenceBuilder
 
@@ -63,7 +62,7 @@ class TestEvidenceBuilderOnly:
     def test_pipeline_has_registered_skills(self):
         """All skills in _SKILL_PIPELINE are registered in the registry."""
         from nsys_ai.skills.registry import get_skill
-        
+
         for name, (skill_name, params) in EvidenceBuilder._SKILL_PIPELINE.items():
             skill = get_skill(skill_name)
             assert skill is not None, (

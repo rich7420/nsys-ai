@@ -24,7 +24,7 @@ def _execute(conn, **kwargs):
     result = overlap_analysis(prof, device, trim=trim)
     if "error" in result:
         return [result]
-        
+
     # Same-stream diagnosis for evidence builder overlap check
     same_stream = []
     try:
