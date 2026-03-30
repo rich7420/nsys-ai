@@ -35,7 +35,7 @@ def _execute(conn, **kwargs):
     memcpy_table = None
     for t in prof.schema.tables:
         if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith("CUPTI_ACTIVITY_KIND_MEMCPY"):
-            memcpy_table = t
+            memcpy_table = '"' + t.replace('"', '""') + '"'
             break
     if not memcpy_table:
         return []

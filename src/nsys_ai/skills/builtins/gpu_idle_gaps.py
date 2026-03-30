@@ -85,6 +85,7 @@ def _execute_inner(conn: sqlite3.Connection, **kwargs):
     gap_sql = f"""\
 WITH ordered AS (
     SELECT k.streamId,
+           k.deviceId,
            k.start, k.[end],
            s.value AS kernel_name,
            LAG(k.[end]) OVER (PARTITION BY k.deviceId, k.streamId ORDER BY k.start) AS prev_end,
@@ -94,6 +95,7 @@ WITH ordered AS (
     WHERE k.deviceId = ? {trim_clause}
 )
 SELECT streamId,
+       deviceId,
        prev_end AS start_ns,
        start AS end_ns,
        (start - prev_end) AS gap_ns,
@@ -304,14 +306,22 @@ def _to_findings(rows: list[dict]) -> list:
 
         if r.get("_summary"):
             pct = r.get("pct_of_profile", 0)
-            if pct > 5 and r.get("profile_start_ns") and r.get("profile_end_ns"):
+            target_device = r.get("gpu_id", 0)
+            profile_start_ns = r.get("profile_start_ns")
+            profile_end_ns = r.get("profile_end_ns")
+
+            if (
+                pct > 5
+                and profile_start_ns is not None
+                and profile_end_ns is not None
+            ):
                 findings.append(
                     Finding(
                         type="region",
                         label=f"GPU Idle Summary ({pct}% of profile)",
-                        start_ns=r["profile_start_ns"],
-                        end_ns=r["profile_end_ns"],
-                        gpu_id=r.get("gpu_id", 0),
+                        start_ns=profile_start_ns,
+                        end_ns=profile_end_ns,
+                        gpu_id=target_device,
                         severity="info" if pct < 15 else "warning",
                         note=(
                             f"Total: {r.get('total_idle_ms', 0):.1f}ms idle across "

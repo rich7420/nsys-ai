@@ -41,7 +41,11 @@ class TestKernelInstances:
         filtered = ki_skill.execute(minimal_nsys_conn, device=0, name=target, limit=100)
         assert len(filtered) >= 1
         assert len(filtered) <= len(all_rows)
-
+        target_lower = target.lower()
+        for row in filtered:
+            short_name = (row.get("short_name") or "").lower()
+            kernel_name = (row.get("kernel_name") or "").lower()
+            assert target_lower in short_name or target_lower in kernel_name
     def test_limit_respected(self, minimal_nsys_conn, ki_skill):
         rows = ki_skill.execute(minimal_nsys_conn, device=0, limit=2)
         assert len(rows) <= 2

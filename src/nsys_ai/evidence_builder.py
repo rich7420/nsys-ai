@@ -63,6 +63,10 @@ class EvidenceBuilder:
 
             try:
                 skill = get_skill(skill_name)
+                if skill is None:
+                    _log.debug("Analyzer %s skipped (skill %s not found)", analyzer_name, skill_name)
+                    continue
+
                 # Map runtime parameters into skill args
                 kwargs = {**params, "device": self.device}
                 if self.trim:
@@ -75,10 +79,7 @@ class EvidenceBuilder:
                 if skill.to_findings_fn:
                     findings.extend(skill.to_findings_fn(rows))
             except Exception as e:
-                import traceback
-                print(f"FAILED TO RUN {analyzer_name}: {e}")
-                traceback.print_exc()
-                _log.debug("Analyzer %s (skill %s) failed", analyzer_name, skill_name, exc_info=True)
+                _log.error("Analyzer %s (skill %s) failed: %s", analyzer_name, skill_name, e, exc_info=True)
 
         return EvidenceReport(
             title="Auto-Analysis",

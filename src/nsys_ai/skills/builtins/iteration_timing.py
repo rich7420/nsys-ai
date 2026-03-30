@@ -47,12 +47,24 @@ def _to_findings(rows: list[dict]) -> list:
     for it in rows:
         if it.get("duration_ms", 0) > 1.5 * med:
             pct = 100 * it["duration_ms"] / med
+            # Prefer nanosecond-precision timestamps if available; fall back to seconds-based values.
+            start_ns = it.get("gpu_start_ns")
+            if start_ns is None:
+                start_ns = int(it.get("gpu_start_s", 0) * 1e9)
+            else:
+                start_ns = int(start_ns)
+            end_ns = it.get("gpu_end_ns")
+            if end_ns is None:
+                end_ns = int(it.get("gpu_end_s", 0) * 1e9)
+            else:
+                end_ns = int(end_ns)
+
             findings.append(
                 Finding(
                     type="region",
                     label=f"Slow Iteration {it.get('iteration', '?')}",
-                    start_ns=int(it.get("gpu_start_s", 0) * 1e9),
-                    end_ns=int(it.get("gpu_end_s", 0) * 1e9),
+                    start_ns=start_ns,
+                    end_ns=end_ns,
                     gpu_id=it.get("device_id", 0),  # Assuming device_id is available or defaults to 0
                     severity="warning",
                     note=(

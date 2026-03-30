@@ -232,7 +232,7 @@ No required parameters. Supports `--trim`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|:--------:|---------|-------------|
-| `iteration` | int | ✅ | 0 | Iteration index (0-based) |
+| `iteration` | int | ✅ | | Iteration index (0-based) |
 | `device` | int | | 0 | GPU device ID |
 | `marker` | str | | `sample_0` | NVTX marker for iteration boundary detection |
 
