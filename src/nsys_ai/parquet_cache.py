@@ -470,16 +470,18 @@ def _build_nvtx_kernel_map(
         WITH kr AS (
             SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
                    k.start AS k_start, k."end" AS k_end, k.shortName,
-                   ks.value AS kernel_name
+                   ks.value AS kernel_name,
+                   r.correlationId
             FROM src.{kernel_table} k
             JOIN src.{runtime_table} r ON r.correlationId = k.correlationId
             LEFT JOIN src.StringIds ks ON k.shortName = ks.id
         ),
-        enclosing AS (
             SELECT kr.k_start, kr.k_end, kr.kernel_name,
                    kr.r_start, kr.r_end, kr.globalTid,
+                   kr.correlationId,
                    {text_expr} AS nvtx_text,
-                   (n."end" - n.start) AS n_dur
+                   (n."end" - n.start) AS n_dur,
+                   n.start AS n_start
             FROM kr
             JOIN src.{nvtx_table} n
               ON n.globalTid = kr.globalTid
@@ -492,15 +494,15 @@ def _build_nvtx_kernel_map(
         ),
         grouped AS (
             SELECT
-                FIRST(nvtx_text ORDER BY n_dur ASC) AS nvtx_text,
+                FIRST(nvtx_text ORDER BY n_dur ASC, n_start ASC) AS nvtx_text,
                 CAST(COUNT(*) - 1 AS INTEGER) AS nvtx_depth,
-                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC) AS nvtx_path,
+                string_agg(nvtx_text, ' > ' ORDER BY n_dur DESC, n_start ASC) AS nvtx_path,
                 kernel_name,
                 k_start,
                 k_end,
                 (k_end - k_start) AS k_dur_ns
             FROM enclosing
-            GROUP BY k_start, k_end, globalTid, kernel_name
+            GROUP BY k_start, k_end, globalTid, kernel_name, correlationId
         )
         SELECT nvtx_text, nvtx_depth, nvtx_path, kernel_name,
                k_start, k_end, k_dur_ns
@@ -737,10 +739,11 @@ def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
         _log.warning("_create_sqlite_alias_views: no tables found in attached 'src' database")
 
     for table_name in src_tables:
+        escaped = table_name.replace('"', '""')
         try:
             db.execute(
-                f'CREATE VIEW IF NOT EXISTS "{table_name}" '
-                f'AS SELECT * FROM src."{table_name}"'
+                f'CREATE VIEW IF NOT EXISTS "{escaped}" '
+                f'AS SELECT * FROM src."{escaped}"'
             )
         except duckdb.Error as e:
             _log.debug("Could not create alias view for %r: %s", table_name, e)
