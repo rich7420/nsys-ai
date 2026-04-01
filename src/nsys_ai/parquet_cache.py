@@ -711,18 +711,27 @@ def open_direct_sqlite(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     db = duckdb.connect()
     safe_path = str(sqlite_path).replace("'", "''")
     try:
-        db.execute(f"ATTACH '{safe_path}' AS src (TYPE SQLITE, READ_ONLY)")
-    except duckdb.Error:
         try:
-            db.execute("DETACH src")
+            db.execute(f"ATTACH '{safe_path}' AS src (TYPE SQLITE, READ_ONLY)")
         except duckdb.Error:
-            pass
-        db.execute("SET sqlite_all_varchar = true")
-        db.execute(f"ATTACH '{safe_path}' AS src (TYPE SQLITE, READ_ONLY)")
+            try:
+                db.execute("DETACH src")
+            except duckdb.Error:
+                pass
+            db.execute("SET sqlite_all_varchar = true")
+            db.execute(f"ATTACH '{safe_path}' AS src (TYPE SQLITE, READ_ONLY)")
 
-    # Create alias views so consumer SQL (which uses original table names)
-    # works unchanged.  Views point through to src.<table>.
-    _create_sqlite_alias_views(db)
+        # Create alias views so consumer SQL (which uses original table names)
+        # works unchanged.  Views point through to src.<table>.
+        _create_sqlite_alias_views(db)
+    except Exception:
+        # Ensure we don't leak the DuckDB connection on initialization failure.
+        try:
+            db.close()
+        except Exception:
+            pass
+        raise
+
     return db
 
 
