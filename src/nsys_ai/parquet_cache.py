@@ -470,12 +470,13 @@ def _build_nvtx_kernel_map(
         WITH kr AS (
             SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
                    k.start AS k_start, k."end" AS k_end, k.shortName,
-                   ks.value AS kernel_name,
+                   COALESCE(ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
                    r.correlationId
             FROM src.{kernel_table} k
             JOIN src.{runtime_table} r ON r.correlationId = k.correlationId
             LEFT JOIN src.StringIds ks ON k.shortName = ks.id
         ),
+        enclosing AS (
             SELECT kr.k_start, kr.k_end, kr.kernel_name,
                    kr.r_start, kr.r_end, kr.globalTid,
                    kr.correlationId,
