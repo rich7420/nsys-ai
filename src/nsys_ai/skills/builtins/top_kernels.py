@@ -17,7 +17,9 @@ def _format(rows):
             name = name[:52] + "..."
 
         tc_status = "[-]"
-        if r.get("tc_eligible"):
+        if r.get("tc_eligible") is None:
+            tc_status = "N/A "
+        elif r.get("tc_eligible"):
             tc_status = "[✓]" if r.get("tc_active") else "[⚠️]"
 
         lines.append(
@@ -91,8 +93,8 @@ def _execute(conn, **kwargs):
                    ROUND(AVG(k."end" - k.start) / 1e6, 2) AS avg_ms,
                    ROUND(MIN(k."end" - k.start) / 1e6, 2) AS min_ms,
                    ROUND(MAX(k."end" - k.start) / 1e6, 2) AS max_ms,
-                   0 AS tc_eligible,
-                   0 AS tc_active
+                   NULL AS tc_eligible,
+                   NULL AS tc_active
             FROM {kernel_table} k
             LEFT JOIN StringIds s ON k.shortName = s.id
             LEFT JOIN StringIds d ON k.demangledName = d.id
