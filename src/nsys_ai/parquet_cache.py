@@ -31,7 +31,9 @@ import duckdb
 log = logging.getLogger(__name__)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 3  # bumped: CUPTI_ACTIVITY_KIND_RUNTIME now uses column projection
+_CACHE_VERSION = (
+    4  # bumped: kernels.parquet now includes is_tc_eligible, uses_tc, name, demangled columns
+)
 
 # Tables to export as-is from SQLite → Parquet.
 # (view_name, source_table_name)
@@ -117,9 +119,12 @@ def build_cache(sqlite_path: str) -> Path:
     cache_dir = _cache_dir_for(sqlite_path)
     # Build into a temp dir first, then atomically rename to avoid race
     # conditions when multiple threads/processes open the same profile.
-    tmp_dir = Path(tempfile.mkdtemp(
-        prefix=".parquet_build_", dir=cache_dir.parent,
-    ))
+    tmp_dir = Path(
+        tempfile.mkdtemp(
+            prefix=".parquet_build_",
+            dir=cache_dir.parent,
+        )
+    )
     try:
         _build_cache_into(sqlite_path, tmp_dir)
     except BaseException:
@@ -167,6 +172,9 @@ _TABLE_PROJECTIONS: dict[str, str] = {
     "CUPTI_ACTIVITY_KIND_RUNTIME_V2": 'start, "end", correlationId, globalTid, nameId',
     "CUPTI_ACTIVITY_KIND_RUNTIME_V3": 'start, "end", correlationId, globalTid, nameId',
 }
+
+_TC_ELIGIBLE_PATTERN = "'(gemm|conv|linear|attention|matmul)'"
+_TC_ACTIVE_PATTERN = "'(xmma|mma_sync|16816|1688|884|ampere_bf16|sm80_tensor_op)'"
 
 
 # Mapping from cache view name (e.g. "kernels") to the actual SQLite table names that
@@ -273,8 +281,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             step[0] += 1
             elapsed = time.monotonic() - t0
             sys.stderr.write(
-                f"\r[nsys-ai] Building cache [{step[0]}/{total_steps}] "
-                f"{name} ({elapsed:.0f}s)"
+                f"\r[nsys-ai] Building cache [{step[0]}/{total_steps}] {name} ({elapsed:.0f}s)"
             )
             sys.stderr.flush()
 
@@ -284,7 +291,14 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             _progress("kernels.parquet")
             db.execute(f"""
                 COPY (
-                    SELECT k.*, s.value AS name, d.value AS demangled
+                    SELECT k.*, COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name, d.value AS demangled,
+                           CAST(CASE
+                   WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN})
+                     OR regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN})
+                   THEN 1
+                   ELSE 0
+               END AS INTEGER) AS is_tc_eligible,
+                           CAST(CASE WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN}) THEN 1 ELSE 0 END AS INTEGER) AS uses_tc
                     FROM src.{kernel_table} k
                     LEFT JOIN src.StringIds s ON k.shortName = s.id
                     LEFT JOIN src.StringIds d ON k.demangledName = d.id
@@ -346,7 +360,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         meta = {
             "version": _CACHE_VERSION,
             "source": os.path.basename(sqlite_path),
-            "empty": len(src_tables) == 0 or not _find_table(src_tables, "StringIds")
+            "empty": len(src_tables) == 0 or not _find_table(src_tables, "StringIds"),
         }
         (cache_dir / ".cache_version").write_text(json.dumps(meta))
 
@@ -354,7 +368,9 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         total_bytes = sum(f.stat().st_size for f in cache_dir.iterdir() if f.is_file())
         log.info(
             "Cache ready: %s/ (%.0fMB, %.1fs)",
-            cache_dir.name, total_bytes / 1e6, elapsed,
+            cache_dir.name,
+            total_bytes / 1e6,
+            elapsed,
         )
 
         _check_cache_size(cache_dir, sqlite_path)
@@ -392,9 +408,7 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     for parquet_file in cache_dir.glob("*.parquet"):
         view_name = parquet_file.stem
         safe_fpath = str(parquet_file).replace("'", "''")
-        db.execute(
-            f'CREATE VIEW "{view_name}" AS SELECT * FROM \'{safe_fpath}\''
-        )
+        db.execute(f"CREATE VIEW \"{view_name}\" AS SELECT * FROM '{safe_fpath}'")
 
     existing_views = {r[0] for r in db.execute("SHOW TABLES").fetchall()}
     for parquet_name, aliases in _ALIASES.items():
@@ -403,9 +417,7 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
         for alias in aliases:
             if alias not in existing_views:
                 try:
-                    db.execute(
-                        f'CREATE VIEW "{alias}" AS SELECT * FROM {parquet_name}'
-                    )
+                    db.execute(f'CREATE VIEW "{alias}" AS SELECT * FROM {parquet_name}')
                 except duckdb.Error:
                     pass  # View already exists or name conflict
 
@@ -456,11 +468,11 @@ def _build_nvtx_kernel_map(
 
     has_textid = _table_has_column(db, f"src.{nvtx_table}", "textId")
     if has_textid:
-        text_expr = 'COALESCE(n.text, ns.value)'
-        text_join = 'LEFT JOIN src.StringIds ns ON n.textId = ns.id'
+        text_expr = "COALESCE(n.text, ns.value)"
+        text_join = "LEFT JOIN src.StringIds ns ON n.textId = ns.id"
     else:
-        text_expr = 'n.text'
-        text_join = ''
+        text_expr = "n.text"
+        text_join = ""
 
     # Pure SQL approach: DuckDB will use IEJoin for the range predicate.
     #
@@ -478,11 +490,12 @@ def _build_nvtx_kernel_map(
         WITH kr AS (
             SELECT r.globalTid, r.start AS r_start, r."end" AS r_end,
                    k.start AS k_start, k."end" AS k_end, k.shortName,
-                   COALESCE(ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
+                   COALESCE(kd.value, ks.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS kernel_name,
                    r.correlationId
             FROM src.{kernel_table} k
             JOIN src.{runtime_table} r ON r.correlationId = k.correlationId
             LEFT JOIN src.StringIds ks ON k.shortName = ks.id
+            LEFT JOIN src.StringIds kd ON k.demangledName = kd.id
         ),
         enclosing AS (
             SELECT kr.k_start, kr.k_end, kr.kernel_name,
@@ -524,9 +537,7 @@ def _build_nvtx_kernel_map(
         db.execute(sql)
         log.info("nvtx_kernel_map built via pure SQL (IEJoin)")
     except duckdb.Error as e:
-        log.warning(
-            "Pure-SQL nvtx_kernel_map failed (%s), falling back to Python sort-merge", e
-        )
+        log.warning("Pure-SQL nvtx_kernel_map failed (%s), falling back to Python sort-merge", e)
         _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)
 
 
@@ -625,18 +636,19 @@ def _build_nvtx_kernel_map_python(
 
             if best_nvtx is not None:
                 enclosing = [
-                    e for e in open_stack[: best_idx + 1]
-                    if e[0] <= r_start and e[1] >= r_end
+                    e for e in open_stack[: best_idx + 1] if e[0] <= r_start and e[1] >= r_end
                 ]
-                results.append({
-                    "nvtx_text": best_nvtx,
-                    "nvtx_depth": len(enclosing) - 1,
-                    "nvtx_path": " > ".join(e[2] for e in enclosing),
-                    "kernel_name": sid_map.get(short_name, f"kernel_{short_name}"),
-                    "k_start": k_start,
-                    "k_end": k_end,
-                    "k_dur_ns": k_end - k_start,
-                })
+                results.append(
+                    {
+                        "nvtx_text": best_nvtx,
+                        "nvtx_depth": len(enclosing) - 1,
+                        "nvtx_path": " > ".join(e[2] for e in enclosing),
+                        "kernel_name": sid_map.get(short_name, f"kernel_{short_name}"),
+                        "k_start": k_start,
+                        "k_end": k_end,
+                        "k_dur_ns": k_end - k_start,
+                    }
+                )
 
     if not results:
         return
@@ -644,15 +656,17 @@ def _build_nvtx_kernel_map_python(
     # ── Write to Parquet via DuckDB ───────────────────────────────────
     import pyarrow as pa
 
-    schema = pa.schema([
-        ("nvtx_text", pa.string()),
-        ("nvtx_depth", pa.int32()),
-        ("nvtx_path", pa.string()),
-        ("kernel_name", pa.string()),
-        ("k_start", pa.int64()),
-        ("k_end", pa.int64()),
-        ("k_dur_ns", pa.int64()),
-    ])
+    schema = pa.schema(
+        [
+            ("nvtx_text", pa.string()),
+            ("nvtx_depth", pa.int32()),
+            ("nvtx_path", pa.string()),
+            ("kernel_name", pa.string()),
+            ("k_start", pa.int64()),
+            ("k_end", pa.int64()),
+            ("k_dur_ns", pa.int64()),
+        ]
+    )
     arrays = [
         pa.array([r["nvtx_text"] for r in results], type=pa.string()),
         pa.array([r["nvtx_depth"] for r in results], type=pa.int32()),
@@ -736,6 +750,25 @@ def open_direct_sqlite(sqlite_path: str) -> duckdb.DuckDBPyConnection:
     return db
 
 
+def _tc_enriched_sql(table_name: str) -> str:
+    """Return SQL for a kernel table enriched with Tensor Core metrics."""
+    return f"""
+        SELECT k.*,
+               COALESCE(d.value, s.value, 'kernel_' || CAST(k.shortName AS VARCHAR)) AS name,
+               d.value AS demangled,
+               CAST(CASE
+                   WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ELIGIBLE_PATTERN})
+                     OR regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN})
+                   THEN 1
+                   ELSE 0
+               END AS INTEGER) AS is_tc_eligible,
+               CAST(CASE WHEN regexp_matches(lower(COALESCE(d.value, s.value, '')), {_TC_ACTIVE_PATTERN}) THEN 1 ELSE 0 END AS INTEGER) AS uses_tc
+        FROM src."{table_name}" k
+        LEFT JOIN src.StringIds s ON k.shortName = s.id
+        LEFT JOIN src.StringIds d ON k.demangledName = d.id
+    """
+
+
 def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
     """Create views that alias ``src.TABLE_NAME → TABLE_NAME`` for consumer SQL."""
     _log = logging.getLogger(__name__)
@@ -751,34 +784,50 @@ def _create_sqlite_alias_views(db: duckdb.DuckDBPyConnection) -> None:
             ).fetchall():
                 src_tables.add(row[0])
         except duckdb.Error:
-            _log.warning("_create_sqlite_alias_views: could not discover tables in attached SQLite; direct-mode queries may fail")
+            _log.warning(
+                "_create_sqlite_alias_views: could not discover tables in attached SQLite; direct-mode queries may fail"
+            )
 
     if not src_tables:
         _log.warning("_create_sqlite_alias_views: no tables found in attached 'src' database")
 
+    # Set of known TC-eligible kernel table names (from _ALIASES)
+    _known_kernel_tables = {
+        t.upper() for aliases in _ALIASES.values() for t in aliases if "KERNEL" in t.upper()
+    }
+
     for table_name in src_tables:
         escaped = table_name.replace('"', '""')
+        is_kernel = table_name.upper() in _known_kernel_tables
+        sql = _tc_enriched_sql(escaped) if is_kernel else f'SELECT * FROM src."{escaped}"'
         try:
-            db.execute(
-                f'CREATE VIEW IF NOT EXISTS "{escaped}" '
-                f'AS SELECT * FROM src."{escaped}"'
-            )
+            db.execute(f'CREATE VIEW IF NOT EXISTS "{escaped}" AS {sql}')
         except duckdb.Error as e:
             _log.debug("Could not create alias view for %r: %s", table_name, e)
 
     # For any table that exists in a versioned form, also create stable views
     # for its aliases (including the unversioned name) so queries work seamlessly.
-    for aliases in _ALIASES.values():
+    for short_name, aliases in _ALIASES.items():
         base_name = aliases[0]
         actual_table = _find_table(src_tables, base_name)
         if actual_table:
             actual_escaped = actual_table.replace('"', '""')
+            is_kernel = "KERNEL" in base_name.upper()
+            sql = (
+                _tc_enriched_sql(actual_escaped)
+                if is_kernel
+                else f'SELECT * FROM src."{actual_escaped}"'
+            )
+            # Create view for versioned names (e.g. CUPTI_ACTIVITY_KIND_KERNEL_V2)
             for alias in aliases:
                 alias_escaped = alias.replace('"', '""')
                 try:
-                    db.execute(
-                        f'CREATE VIEW IF NOT EXISTS "{alias_escaped}" '
-                        f'AS SELECT * FROM src."{actual_escaped}"'
-                    )
+                    db.execute(f'CREATE VIEW IF NOT EXISTS "{alias_escaped}" AS {sql}')
                 except duckdb.Error:
                     pass
+            # Also create a short-name view (e.g. "kernels") so skills can use FROM kernels
+            short_escaped = short_name.replace('"', '""')
+            try:
+                db.execute(f'CREATE VIEW IF NOT EXISTS "{short_escaped}" AS {sql}')
+            except duckdb.Error as e:
+                _log.debug("Could not create short-name alias view %r: %s", short_name, e)

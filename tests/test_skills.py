@@ -34,6 +34,7 @@ def test_list_skills():
         "schema_inspect",
         "speedup_estimator",
         "stream_concurrency",
+        "tensor_core_usage",
         "theoretical_flops",
         "thread_utilization",
         "top_kernels",
@@ -903,3 +904,65 @@ def test_root_cause_includes_new_patterns(minimal_nsys_conn):
     assert len(rows) >= 4
     text = skill.format_rows(rows)
     assert len(text) > 50
+
+
+def test_tensor_core_usage_fallback(minimal_nsys_conn):
+    """Fallback error matches Copilot review feedback on pure SQLite."""
+    from nsys_ai.skills.registry import get_skill
+
+    skill = get_skill("tensor_core_usage")
+    # This DB has no duckdb or `kernels` view mapped, so it hits the except block.
+    rows = skill.execute(minimal_nsys_conn)
+    assert len(rows) == 1
+    assert "error" in rows[0]
+    assert "exposes a 'kernels' view" in rows[0]["error"]
+
+    text = skill.format_rows(rows)
+    assert "Error: Tensor Core analysis requires" in text
+
+
+def test_tensor_core_usage_duckdb():
+    """Verify DuckDB execution handles tensor_core_usage."""
+    import duckdb
+
+    from nsys_ai.skills.registry import get_skill
+
+    conn = duckdb.connect()
+    # Mock DuckDB schema
+    conn.execute(
+        """
+        CREATE VIEW kernels AS SELECT * FROM (VALUES
+            ('ampere_sgemm_128x128', 100, 200, 1, 1),
+            ('vectorized_elementwise', 300, 400, 0, 0),
+            ('ampere_fp16_fallback', 500, 600, 1, 0)
+        ) AS t(name, start, "end", is_tc_eligible, uses_tc)
+        """
+    )
+
+    skill = get_skill("tensor_core_usage")
+    rows = skill.execute(conn)
+
+    # vectorized_elementwise is NOT eligible
+    assert len(rows) == 2
+
+    # Make assertions independent of row order by indexing rows by kernel_name.
+    rows_by_name = {row["kernel_name"]: row for row in rows}
+
+    # Fallback
+    fallback = rows_by_name["ampere_fp16_fallback"]
+    assert fallback["total_gpu_ms"] == 100 / 1e6
+    assert fallback["tc_active_ms"] == 0
+    assert fallback["tc_achieved_pct"] == 0.0
+    assert fallback["is_outlier"] is True
+
+    # Active
+    active = rows_by_name["ampere_sgemm_128x128"]
+    assert active["total_gpu_ms"] == 100 / 1e6
+    assert active["tc_active_ms"] == 100 / 1e6
+    assert active["tc_achieved_pct"] == 100.0
+    assert active["is_outlier"] is False
+
+    text = skill.format_rows(rows)
+    assert "ampere_fp16_fallback" in text
+    assert "ampere_sgemm_128x128" in text
+    assert "⚠️" in text
