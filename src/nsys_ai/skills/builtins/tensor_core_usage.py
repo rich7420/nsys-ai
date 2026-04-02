@@ -7,6 +7,7 @@ utilized the hardware Tensor Cores. Helps find FP32 fallbacks and alignment erro
 
 from ..base import Skill, SkillParam
 
+
 def _execute(conn, **kwargs):
     """Execute Tensor Core eligibility analysis."""
     limit = int(kwargs.get("limit", 20))
@@ -16,11 +17,11 @@ def _execute(conn, **kwargs):
     trim_clause = ""
     params = []
     if trim_start is not None and trim_end is not None:
-        trim_clause = "AND start >= ? AND \"end\" <= ?"
+        trim_clause = 'AND start >= ? AND "end" <= ?'
         params = [trim_start, trim_end]
 
     # Only include TC-eligible kernels
-    sql = f'''
+    sql = f"""
         SELECT
             name,
             SUM("end" - start) AS total_ns,
@@ -31,13 +32,18 @@ def _execute(conn, **kwargs):
         WHERE is_tc_eligible = 1 {trim_clause}
         GROUP BY name
         ORDER BY total_ns DESC
-    '''
+        LIMIT {limit}
+    """
     try:
         rows = conn.execute(sql, params).fetchall()
         cols = ["name", "total_ns", "call_count", "tc_active_ns", "tc_active_calls"]
         rows = [dict(zip(cols, r)) for r in rows]
     except Exception as e:
-        return [{"error": f"Tensor Core analysis requires DuckDB cache. Please do not force --backend sqlite. (Details: {e})"}]
+        return [
+            {
+                "error": f"Tensor Core analysis requires DuckDB cache. Please do not force --backend sqlite. (Details: {e})"
+            }
+        ]
 
     if not rows:
         return []
@@ -48,22 +54,25 @@ def _execute(conn, **kwargs):
         call_count = r["call_count"]
         tc_active_ns = r["tc_active_ns"]
         tc_active_calls = r["tc_active_calls"]
-        
+
         tc_pct_time = (tc_active_ns / total_ns * 100.0) if total_ns > 0 else 0.0
         tc_pct_calls = (tc_active_calls / call_count * 100.0) if call_count > 0 else 0.0
 
-        results.append({
-            "kernel_name": r["name"],
-            "total_gpu_ms": total_ns / 1e6,
-            "call_count": call_count,
-            "tc_active_ms": tc_active_ns / 1e6,
-            "tc_active_calls": tc_active_calls,
-            "tc_achieved_pct": tc_pct_time,
-            "tc_calls_pct": tc_pct_calls,
-            "is_outlier": tc_pct_time < 50.0  # Flag any kernel with < 50% TC uptime as an outlier/fallback
-        })
-        
-    return results[:limit]
+        results.append(
+            {
+                "kernel_name": r["name"],
+                "total_gpu_ms": total_ns / 1e6,
+                "call_count": call_count,
+                "tc_active_ms": tc_active_ns / 1e6,
+                "tc_active_calls": tc_active_calls,
+                "tc_achieved_pct": tc_pct_time,
+                "tc_calls_pct": tc_pct_calls,
+                "is_outlier": tc_pct_time
+                < 50.0,  # Flag any kernel with < 50% TC uptime as an outlier/fallback
+            }
+        )
+
+    return results
 
 
 def _format(rows):
@@ -77,16 +86,16 @@ def _format(rows):
         f"{'Kernel Name':<50s}  {'Calls':>8s}  {'TC Calls':>10s}  {'Time(ms)':>10s}  {'TC Ops%':>8s}  {'Flag':>6s}",
         "─" * 100,
     ]
-    
+
     total_eligible_ms = sum(r["total_gpu_ms"] for r in rows)
     total_active_ms = sum(r["tc_active_ms"] for r in rows)
     global_pct = (total_active_ms / total_eligible_ms * 100.0) if total_eligible_ms > 0 else 0.0
-    
+
     for r in rows:
         name = r["kernel_name"]
         if len(name) > 48:
             name = "..." + name[-45:]
-            
+
         flag = " ⚠️" if r["is_outlier"] else ""
         lines.append(
             f"{name:<50s}  {r['call_count']:>8d}  {r['tc_calls_pct']:>9.1f}%"
@@ -96,7 +105,9 @@ def _format(rows):
     lines.append("-" * 100)
     lines.append(f"Global Top-K TC Achieved: {global_pct:.1f}%")
     if global_pct < 100.0:
-        lines.append("Note: ⚠️ flags kernels that frequently fallback to FP32. Check alignment and padding.")
+        lines.append(
+            "Note: ⚠️ flags kernels that frequently fallback to FP32. Check alignment and padding."
+        )
 
     return "\n".join(lines)
 
@@ -110,8 +121,9 @@ SKILL = Skill(
         "they actually utilized Tensor Cores. Flags kernels that silently "
         "fell back to non-TC generic ALUs due to shape/alignment issues."
     ),
-    category="gpu",
+    category="kernels",
     execute_fn=_execute,
+    format_fn=_format,
     params=[
         SkillParam("limit", "Max kernels to return", "int", False, 20),
     ],

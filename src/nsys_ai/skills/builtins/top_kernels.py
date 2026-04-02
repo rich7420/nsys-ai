@@ -15,11 +15,11 @@ def _format(rows):
         name = r["kernel_name"]
         if len(name) > 55:
             name = name[:52] + "..."
-            
+
         tc_status = "[-]"
         if r.get("tc_eligible"):
             tc_status = "[✓]" if r.get("tc_active") else "[⚠️]"
-            
+
         lines.append(
             f"{tc_status:<3s}  {name:<57s}  {r['invocations']:>7d}  {r['total_ms']:>10.2f}  "
             f"{r['avg_ms']:>9.2f}  {r['min_ms']:>9.2f}  {r['max_ms']:>9.2f}"
@@ -42,9 +42,9 @@ def _execute(conn, **kwargs):
     if has_kernels:
         trim_clause = ""
         if trim_start is not None and trim_end is not None:
-            trim_clause = "AND start >= ? AND \"end\" <= ?"
+            trim_clause = 'AND start >= ? AND "end" <= ?'
             params.extend([trim_start, trim_end])
-            
+
         sql = f"""
             SELECT name AS kernel_name,
                    COUNT(*) AS invocations,
@@ -61,14 +61,24 @@ def _execute(conn, **kwargs):
             LIMIT {limit}
         """
         rows = conn.execute(sql, params).fetchall()
-        cols = ["kernel_name", "invocations", "total_ms", "avg_ms", "min_ms", "max_ms", "tc_eligible", "tc_active"]
+        cols = [
+            "kernel_name",
+            "invocations",
+            "total_ms",
+            "avg_ms",
+            "min_ms",
+            "max_ms",
+            "tc_eligible",
+            "tc_active",
+        ]
         return [dict(zip(cols, r)) for r in rows]
     else:
         # Pure SQLite fallback (lacks TC eligibility analysis)
         from nsys_ai.skills.base import _resolve_activity_tables
+
         tables = _resolve_activity_tables(conn)
         kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
-        
+
         trim_clause = ""
         if trim_start is not None and trim_end is not None:
             trim_clause = "AND k.start >= ? AND k.[end] <= ?"
@@ -92,8 +102,18 @@ def _execute(conn, **kwargs):
             LIMIT {limit}
         """
         rows = conn.execute(sql, params).fetchall()
-        cols = ["kernel_name", "invocations", "total_ms", "avg_ms", "min_ms", "max_ms", "tc_eligible", "tc_active"]
+        cols = [
+            "kernel_name",
+            "invocations",
+            "total_ms",
+            "avg_ms",
+            "min_ms",
+            "max_ms",
+            "tc_eligible",
+            "tc_active",
+        ]
         return [dict(zip(cols, r)) if isinstance(r, tuple) else dict(r) for r in rows]
+
 
 SKILL = Skill(
     name="top_kernels",

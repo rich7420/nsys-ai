@@ -40,14 +40,18 @@ def _execute(conn, **kwargs):
         elif token in false_tokens:
             auto_depth = False
         else:
-            return [{"error": f"Invalid value for auto_depth: {raw_auto_depth!r}. "
-                              f"Expected one of {sorted(true_tokens | false_tokens)}."}]
+            return [
+                {
+                    "error": f"Invalid value for auto_depth: {raw_auto_depth!r}. "
+                    f"Expected one of {sorted(true_tokens | false_tokens)}."
+                }
+            ]
     else:
         auto_depth = bool(raw_auto_depth)
 
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
-    
+
     # Check if nvtx_kernel_map exists or can be built
     try:
         conn.execute("SELECT 1 FROM nvtx_kernel_map LIMIT 1")
@@ -73,10 +77,14 @@ def _execute(conn, **kwargs):
             if detection_meta["layer_depth"] is not None:
                 auto_group_depth = detection_meta["layer_depth"]
             else:
-                available_depths = sorted({r.get("nvtx_depth", 0) for r in rows if r.get("nvtx_depth") is not None})
+                available_depths = sorted(
+                    {r.get("nvtx_depth", 0) for r in rows if r.get("nvtx_depth") is not None}
+                )
                 depth_samples = {}
                 for d in available_depths[:5]:
-                    depth_samples[d] = [r.get("nvtx_text", "") for r in rows if r.get("nvtx_depth") == d][:3]
+                    depth_samples[d] = [
+                        r.get("nvtx_text", "") for r in rows if r.get("nvtx_depth") == d
+                    ][:3]
                 detection_meta["available_depths"] = available_depths
                 detection_meta["depth_samples"] = depth_samples
 
@@ -84,11 +92,20 @@ def _execute(conn, **kwargs):
             if depth < 0:
                 return [{"error": "Invalid depth <0 requested. Depth must be >= 0."}]
 
-        groups_leaf = defaultdict(lambda: {
-            "leaf_depth": -1, "leaf_text": "", "total_ns": 0, "nccl_ns": 0, "compute_ns": 0,
-            "tc_elig": 0, "tc_act": 0, "count": 0, "max_ns": 0
-        })
-        
+        groups_leaf = defaultdict(
+            lambda: {
+                "leaf_depth": -1,
+                "leaf_text": "",
+                "total_ns": 0,
+                "nccl_ns": 0,
+                "compute_ns": 0,
+                "tc_elig": 0,
+                "tc_act": 0,
+                "count": 0,
+                "max_ns": 0,
+            }
+        )
+
         k_times_by_group = defaultdict(lambda: defaultdict(int))
         _class_cache = {}
         for r in rows:
@@ -115,12 +132,22 @@ def _execute(conn, **kwargs):
             stats["count"] += 1
             if dur_ns > stats["max_ns"]:
                 stats["max_ns"] = dur_ns
-            
+
             k_times_by_group[path][k_name] += dur_ns
 
         leaf_rows = [
-            (path, v["leaf_depth"], v["leaf_text"], v["total_ns"], v["nccl_ns"], v["compute_ns"], 
-             v["tc_elig"], v["tc_act"], v["count"], v["max_ns"])
+            (
+                path,
+                v["leaf_depth"],
+                v["leaf_text"],
+                v["total_ns"],
+                v["nccl_ns"],
+                v["compute_ns"],
+                v["tc_elig"],
+                v["tc_act"],
+                v["count"],
+                v["max_ns"],
+            )
             for path, v in groups_leaf.items()
         ]
 
@@ -139,8 +166,18 @@ def _execute(conn, **kwargs):
         detection_meta = None
         auto_group_depth = None
         if depth is None and auto_depth:
-            paths = [r[0] for r in conn.execute("SELECT DISTINCT nvtx_path FROM nvtx_kernel_map").fetchall()]
-            dummy_rows = [{"nvtx_path": p, "nvtx_text": p.split(" > ")[-1] if p else "", "nvtx_depth": p.count(" > ")} for p in paths]
+            paths = [
+                r[0]
+                for r in conn.execute("SELECT DISTINCT nvtx_path FROM nvtx_kernel_map").fetchall()
+            ]
+            dummy_rows = [
+                {
+                    "nvtx_path": p,
+                    "nvtx_text": p.split(" > ")[-1] if p else "",
+                    "nvtx_depth": p.count(" > "),
+                }
+                for p in paths
+            ]
             detection_meta = detect_layer_depth(dummy_rows)
             if detection_meta["layer_depth"] is not None:
                 auto_group_depth = detection_meta["layer_depth"]
@@ -148,7 +185,9 @@ def _execute(conn, **kwargs):
                 available_depths = sorted({r["nvtx_depth"] for r in dummy_rows})
                 depth_samples = {}
                 for d in available_depths[:5]:
-                    depth_samples[d] = [r["nvtx_text"] for r in dummy_rows if r["nvtx_depth"] == d][:3]
+                    depth_samples[d] = [r["nvtx_text"] for r in dummy_rows if r["nvtx_depth"] == d][
+                        :3
+                    ]
                 detection_meta["available_depths"] = available_depths
                 detection_meta["depth_samples"] = depth_samples
 
@@ -158,7 +197,7 @@ def _execute(conn, **kwargs):
 
         # Phase 1: Pure SQL aggregation across all leaf paths
         sql_agg = f"""
-            SELECT 
+            SELECT
                 n.nvtx_path,
                 FIRST(n.nvtx_depth) AS leaf_depth,
                 FIRST(n.nvtx_text) AS leaf_text,
@@ -170,7 +209,7 @@ def _execute(conn, **kwargs):
                 COUNT(*) AS count,
                 MAX(n.k_dur_ns) AS max_ns
             FROM nvtx_kernel_map n
-            JOIN kernels k ON n.k_start = k.start AND (n.k_end - n.k_start) = (k."end" - k.start)
+            JOIN kernels k ON n.k_start = k.start AND n.k_end = k."end"
             WHERE 1=1 {trim_clause}
             GROUP BY n.nvtx_path
         """
@@ -183,20 +222,39 @@ def _execute(conn, **kwargs):
             leaf_rows = [r for r in leaf_rows if r[1] == depth]
 
     # Phase 2: Python rollover for auto_group_depth truncation
-    groups = defaultdict(lambda: {
-        "total_ns": 0, "compute_ns": 0, "nccl_ns": 0,
-        "tc_eligible_ns": 0, "tc_active_ns": 0,
-        "count": 0, "max_ns": 0, "nvtx_depth": -1,
-        "nvtx_path": "", "nvtx_region": ""
-    })
+    groups = defaultdict(
+        lambda: {
+            "total_ns": 0,
+            "compute_ns": 0,
+            "nccl_ns": 0,
+            "tc_eligible_ns": 0,
+            "tc_active_ns": 0,
+            "count": 0,
+            "max_ns": 0,
+            "nvtx_depth": -1,
+            "nvtx_path": "",
+            "nvtx_region": "",
+        }
+    )
 
     for row in leaf_rows:
-        nvtx_path, leaf_depth, leaf_text, total_ns, nccl_ns, compute_ns, tc_elig, tc_act, count, max_ns = row
-        
+        (
+            nvtx_path,
+            leaf_depth,
+            leaf_text,
+            total_ns,
+            nccl_ns,
+            compute_ns,
+            tc_elig,
+            tc_act,
+            count,
+            max_ns,
+        ) = row
+
         path_parts = nvtx_path.split(" > ") if nvtx_path else [""]
         if auto_group_depth is not None:
             if auto_group_depth < len(path_parts):
-                group_key = " > ".join(path_parts[:auto_group_depth + 1])
+                group_key = " > ".join(path_parts[: auto_group_depth + 1])
                 region_name = group_key
                 group_depth = auto_group_depth
             else:
@@ -209,14 +267,14 @@ def _execute(conn, **kwargs):
             group_depth = leaf_depth
 
         stats = groups[group_key]
-        stats["total_ns"] += (total_ns or 0)
-        stats["compute_ns"] += (compute_ns or 0)
-        stats["nccl_ns"] += (nccl_ns or 0)
-        stats["tc_eligible_ns"] += (tc_elig or 0)
-        stats["tc_active_ns"] += (tc_act or 0)
+        stats["total_ns"] += total_ns or 0
+        stats["compute_ns"] += compute_ns or 0
+        stats["nccl_ns"] += nccl_ns or 0
+        stats["tc_eligible_ns"] += tc_elig or 0
+        stats["tc_active_ns"] += tc_act or 0
         stats["count"] += count
         if (max_ns or 0) > stats["max_ns"]:
-            stats["max_ns"] = (max_ns or 0)
+            stats["max_ns"] = max_ns or 0
         if stats["nvtx_depth"] < 0:
             stats["nvtx_depth"] = group_depth
             stats["nvtx_path"] = group_key
@@ -237,7 +295,7 @@ def _execute(conn, **kwargs):
             path_parts = nvtx_path.split(" > ") if nvtx_path else [""]
             if auto_group_depth is not None:
                 if auto_group_depth < len(path_parts):
-                    group_key = " > ".join(path_parts[:auto_group_depth + 1])
+                    group_key = " > ".join(path_parts[: auto_group_depth + 1])
                 else:
                     group_key = nvtx_path
             else:
@@ -258,26 +316,27 @@ def _execute(conn, **kwargs):
         # Sort and pick top kernels
         ktimes = k_times_by_group[path_key]
         top_k = sorted(ktimes.items(), key=lambda x: -x[1])[:3]
-        top_kernels = [
-            {"kernel_name": k, "total_ms": round(v / 1e6, 3)}
-            for k, v in top_k
-        ]
+        top_kernels = [{"kernel_name": k, "total_ms": round(v / 1e6, 3)} for k, v in top_k]
 
-        results.append({
-            "_raw_total_ns": total_ns,
-            "nvtx_region": stats["nvtx_region"],
-            "nvtx_depth": stats["nvtx_depth"],
-            "nvtx_path": stats["nvtx_path"],
-            "kernel_count": count,
-            "total_gpu_ms": round(total_ns / 1e6, 2),
-            "compute_ms": round(compute_ns / 1e6, 2),
-            "nccl_ms": round(nccl_ns / 1e6, 2),
-            "nccl_pct": round(100 * nccl_ns / total_ns, 1) if total_ns > 0 else 0,
-            "tc_achieved_pct": round(100 * tc_act / tc_elig, 1) if tc_elig > 0 else (100.0 if tc_act > 0 else 0.0),
-            "avg_kernel_ms": round(total_ns / count / 1e6, 3) if count else 0,
-            "max_kernel_ms": round(stats["max_ns"] / 1e6, 3),
-            "top_kernels": top_kernels,
-        })
+        results.append(
+            {
+                "_raw_total_ns": total_ns,
+                "nvtx_region": stats["nvtx_region"],
+                "nvtx_depth": stats["nvtx_depth"],
+                "nvtx_path": stats["nvtx_path"],
+                "kernel_count": count,
+                "total_gpu_ms": round(total_ns / 1e6, 2),
+                "compute_ms": round(compute_ns / 1e6, 2),
+                "nccl_ms": round(nccl_ns / 1e6, 2),
+                "nccl_pct": round(100 * nccl_ns / total_ns, 1) if total_ns > 0 else 0,
+                "tc_achieved_pct": round(100 * tc_act / tc_elig, 1)
+                if tc_elig > 0
+                else 0.0,
+                "avg_kernel_ms": round(total_ns / count / 1e6, 3) if count else 0,
+                "max_kernel_ms": round(stats["max_ns"] / 1e6, 3),
+                "top_kernels": top_kernels,
+            }
+        )
 
     # Sort descending
     results.sort(key=lambda r: -r["_raw_total_ns"])
@@ -338,12 +397,14 @@ def _format(rows):
     if not rows:
         return "\n".join(lines) + "\n(No NVTX regions with attributed kernels found)"
 
-    lines.extend([
-        "── NVTX Region GPU Time Breakdown ──",
-        f"{'NVTX Region':<40s}  {'Depth':>5s}  {'Kernels':>7s}  {'Total(ms)':>10s}"
-        f"  {'Compute':>9s}  {'NCCL':>9s}  {'NCCL%':>6s}  {'TC Ops%':>7s}  {'Outlier':>7s}",
-        "─" * 116,
-    ])
+    lines.extend(
+        [
+            "── NVTX Region GPU Time Breakdown ──",
+            f"{'NVTX Region':<40s}  {'Depth':>5s}  {'Kernels':>7s}  {'Total(ms)':>10s}"
+            f"  {'Compute':>9s}  {'NCCL':>9s}  {'NCCL%':>6s}  {'TC Ops%':>7s}  {'Outlier':>7s}",
+            "─" * 116,
+        ]
+    )
     for r in rows:
         # Favor nvtx_path over nvtx_region for disambiguation
         name = r.get("nvtx_path") or r.get("nvtx_region") or "(unnamed)"
