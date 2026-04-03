@@ -103,6 +103,7 @@ class TestBuildAndOpen:
         # Touch the SQLite to make it newer; sleep long enough to exceed
         # coarse filesystem mtime granularity (often 1s).
         import time
+
         time.sleep(1.1)
         os.utime(minimal_nsys_db_path, None)
 

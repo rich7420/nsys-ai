@@ -189,6 +189,7 @@ class TestDuckDBCompatibilityFixes:
     def test_gpu_idle_gaps_skill(self, duckdb_conn):
         """gpu_idle_gaps skill should not crash on DuckDB tuples or missing row_factory."""
         from nsys_ai.skills.registry import get_skill
+
         skill = get_skill("gpu_idle_gaps")
         # Should execute successfully and return rows
         rows = skill.execute(duckdb_conn)
@@ -199,6 +200,7 @@ class TestDuckDBCompatibilityFixes:
     def test_profile_from_conn_row_factory(self, duckdb_conn):
         """Profile._from_conn should not crash when assigning row_factory to DuckDB."""
         from nsys_ai.profile import Profile
+
         p = Profile._from_conn(duckdb_conn)
         assert p.conn is duckdb_conn
         assert p.db is duckdb_conn  # DuckDB connection is stored in p.db
@@ -206,6 +208,7 @@ class TestDuckDBCompatibilityFixes:
     def test_root_cause_matcher_safe_execute(self, duckdb_conn):
         """root_cause_matcher should gracefully handle any internal skill exceptions."""
         from nsys_ai.skills.registry import get_skill
+
         skill = get_skill("root_cause_matcher")
         # Ensure it doesn't crash even if a sub-skill throws an error
         rows = skill.execute(duckdb_conn)
@@ -214,6 +217,7 @@ class TestDuckDBCompatibilityFixes:
     def test_region_mfu_detect_nvtx_text_id(self, duckdb_conn):
         """region_mfu._detect_nvtx_text_id should use DESCRIBE for DuckDB."""
         from nsys_ai.region_mfu import _detect_nvtx_text_id
+
         # Our mock duckdb_conn has an NVTX_EVENTS table with textId
         has_text_id = _detect_nvtx_text_id(duckdb_conn)
         assert has_text_id is True
@@ -221,6 +225,7 @@ class TestDuckDBCompatibilityFixes:
     def test_profile_metadata_discovery(self, duckdb_conn):
         """Profile._detect_nvtx_text_id and NsightSchema should work with DuckDB."""
         from nsys_ai.profile import Profile
+
         p = Profile._from_conn(duckdb_conn)
         # Should have successfully detected version and NVTX text ID
         assert p._nvtx_has_text_id is True
@@ -233,6 +238,7 @@ class TestDuckDBCompatibilityFixes:
         import duckdb
 
         from nsys_ai.skills.registry import get_skill
+
         skill = get_skill("h2d_distribution")
 
         # Create a fresh DuckDB connection without the memcpy table

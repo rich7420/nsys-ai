@@ -24,12 +24,11 @@ def _query_memcpy(prof, device, trim):
     """Query memcpy intervals from CUPTI_ACTIVITY_KIND_MEMCPY."""
     memcpy_table = None
     for t in prof.schema.tables:
-        if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith(
-            "CUPTI_ACTIVITY_KIND_MEMCPY"
-        ):
+        if t == "CUPTI_ACTIVITY_KIND_MEMCPY" or t.startswith("CUPTI_ACTIVITY_KIND_MEMCPY"):
             memcpy_table = t
             break
     import re
+
     if memcpy_table is None or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", memcpy_table):
         return []
 
@@ -104,33 +103,33 @@ def _execute(conn, **kwargs):
             if a == b:
                 # Diagonal: self-time
                 val_ns = self_time[a]
-                pairs.append({
-                    "category_a": a,
-                    "category_b": b,
-                    "overlap_ns": val_ns,
-                    "overlap_ms": round(val_ns / 1e6, 2),
-                    "is_diagonal": True,
-                    "pct_of_a": None,
-                    "pct_of_b": None,
-                })
+                pairs.append(
+                    {
+                        "category_a": a,
+                        "category_b": b,
+                        "overlap_ns": val_ns,
+                        "overlap_ms": round(val_ns / 1e6, 2),
+                        "is_diagonal": True,
+                        "pct_of_a": None,
+                        "pct_of_b": None,
+                    }
+                )
             else:
                 # Off-diagonal: pairwise overlap
                 val_ns = pairwise.get((a, b), 0)
                 a_total = self_time.get(a, 0)
                 b_total = self_time.get(b, 0)
-                pairs.append({
-                    "category_a": a,
-                    "category_b": b,
-                    "overlap_ns": val_ns,
-                    "overlap_ms": round(val_ns / 1e6, 2),
-                    "is_diagonal": False,
-                    "pct_of_a": (
-                        round(100 * val_ns / a_total, 1) if a_total else 0
-                    ),
-                    "pct_of_b": (
-                        round(100 * val_ns / b_total, 1) if b_total else 0
-                    ),
-                })
+                pairs.append(
+                    {
+                        "category_a": a,
+                        "category_b": b,
+                        "overlap_ns": val_ns,
+                        "overlap_ms": round(val_ns / 1e6, 2),
+                        "is_diagonal": False,
+                        "pct_of_a": (round(100 * val_ns / a_total, 1) if a_total else 0),
+                        "pct_of_b": (round(100 * val_ns / b_total, 1) if b_total else 0),
+                    }
+                )
 
     return pairs
 
@@ -240,7 +239,14 @@ SKILL = Skill(
         SkillParam("device", "GPU device ID", "int", False, 0),
     ],
     tags=[
-        "overlap", "matrix", "nccl", "compute", "communication",
-        "contention", "distributed", "multi-gpu", "memcpy",
+        "overlap",
+        "matrix",
+        "nccl",
+        "compute",
+        "communication",
+        "contention",
+        "distributed",
+        "multi-gpu",
+        "memcpy",
     ],
 )

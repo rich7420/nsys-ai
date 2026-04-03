@@ -78,13 +78,17 @@ ORDER BY total_mb DESC"""
         return []
 
     # 2. Large transfer anomalies (for evidence/findings)
-    anomaly_sql = f"""\
+    anomaly_sql = (
+        f"""\
 SELECT copyKind, bytes, start, [end], ([end] - start) AS dur_ns
 FROM {memcpy_table}
 WHERE deviceId = ? AND bytes > 10000000
-""" + (" AND [end] >= ? AND start <= ? " if trim else "") + f"""
+"""
+        + (" AND [end] >= ? AND start <= ? " if trim else "")
+        + f"""
 ORDER BY dur_ns DESC
 LIMIT {limit}"""
+    )
 
     anomalies = []
     try:
@@ -92,16 +96,13 @@ LIMIT {limit}"""
     except (sqlite3.Error, duckdb.Error):
         pass
 
-    rows.append({
-        "_metadata": True,
-        "anomalies": anomalies,
-        "device_id": device
-    })
+    rows.append({"_metadata": True, "anomalies": anomalies, "device_id": device})
     return rows
 
 
 def _to_findings(rows: list[dict]) -> list:
     from nsys_ai.annotation import Finding
+
     findings = []
     if not rows:
         return findings
@@ -144,11 +145,10 @@ SKILL = Skill(
     to_findings_fn=_to_findings,
     params=[
         SkillParam("device", "GPU device ID", "int", False, 0),
-        SkillParam("limit", "Num anomalies to report", "int", False, 5)
+        SkillParam("limit", "Num anomalies to report", "int", False, 5),
     ],
     tags=["memory", "bandwidth", "memcpy", "transfer", "H2D", "D2H", "utilization"],
 )
-
 
 
 def _format(rows):

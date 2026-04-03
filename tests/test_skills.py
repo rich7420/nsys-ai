@@ -13,6 +13,7 @@ def test_list_skills():
 
     expected = [
         "cpu_gpu_pipeline",
+        "gc_impact",
         "gpu_idle_gaps",
         "h2d_distribution",
         "iteration_detail",
@@ -23,11 +24,13 @@ def test_list_skills():
         "kernel_overlap_matrix",
         "memory_bandwidth",
         "memory_transfers",
+        "module_loading",
         "nccl_anomaly",
         "nccl_breakdown",
         "nvtx_kernel_map",
         "nvtx_layer_breakdown",
         "overlap_breakdown",
+        "pipeline_bubble_metrics",
         "profile_health_manifest",
         "region_mfu",
         "root_cause_matcher",

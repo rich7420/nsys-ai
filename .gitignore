@@ -17,6 +17,7 @@ timeline_viewer.html
 
 *.sqlite
 *.nsys-rep
+*.nsys-cache/
 examples/*/output/
 snapshot_report.html
 uv.lock

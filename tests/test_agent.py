@@ -1,7 +1,6 @@
 """Tests for the agent persona and loop."""
 
 
-
 def test_agent_identity():
     """Agent identity should have expected fields."""
     from nsys_ai.agent.persona import AGENT_IDENTITY

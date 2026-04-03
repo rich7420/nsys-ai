@@ -29,13 +29,15 @@ def _execute(conn, **kwargs):
     # 1. Get all iterations
     iters = detect_iterations(prof, device, trim=trim, marker=marker)
     if not iters:
-        return [{
-            "error": (
-                "No iterations detected. This can occur if NVTX markers do not match, "
-                "the selected device has no kernel activity, or runtime/NVTX data is missing. "
-                f"(device={device}, marker={marker})"
-            )
-        }]
+        return [
+            {
+                "error": (
+                    "No iterations detected. This can occur if NVTX markers do not match, "
+                    "the selected device has no kernel activity, or runtime/NVTX data is missing. "
+                    f"(device={device}, marker={marker})"
+                )
+            }
+        ]
     if iteration < 0 or iteration >= len(iters):
         return [{"error": f"Iteration {iteration} out of range (0-{len(iters) - 1})"}]
 
@@ -60,31 +62,35 @@ def _execute(conn, **kwargs):
         name = k.get("demangled", "?")
         if len(name) > 60:
             name = name[:57] + "..."
-        top_kernels.append({
-            "name": name,
-            "total_ms": round(k["total_ns"] / 1e6, 2),
-            "count": k["count"],
-            "pct": pct,
-        })
+        top_kernels.append(
+            {
+                "name": name,
+                "total_ms": round(k["total_ns"] / 1e6, 2),
+                "count": k["count"],
+                "pct": pct,
+            }
+        )
 
     # 3. Compute vs_median
     durs = [it["duration_ms"] for it in iters]
     median = statistics.median(durs)
     vs_median = round((target["duration_ms"] - median) / median * 100, 1) if median > 0 else 0
 
-    return [{
-        "iteration": iteration,
-        "total_iterations": len(iters),
-        "duration_ms": target["duration_ms"],
-        "gpu_start_ns": start_ns,
-        "gpu_end_ns": end_ns,
-        "top_kernels": top_kernels,
-        "kernel_count": target.get("kernel_count", 0),
-        "nccl_count": target.get("nccl_count", 0),
-        "compute_ms": target.get("compute_ms", 0),
-        "vs_median": f"{'+' if vs_median >= 0 else ''}{vs_median}%",
-        "median_ms": round(median, 2),
-    }]
+    return [
+        {
+            "iteration": iteration,
+            "total_iterations": len(iters),
+            "duration_ms": target["duration_ms"],
+            "gpu_start_ns": start_ns,
+            "gpu_end_ns": end_ns,
+            "top_kernels": top_kernels,
+            "kernel_count": target.get("kernel_count", 0),
+            "nccl_count": target.get("nccl_count", 0),
+            "compute_ms": target.get("compute_ms", 0),
+            "vs_median": f"{'+' if vs_median >= 0 else ''}{vs_median}%",
+            "median_ms": round(median, 2),
+        }
+    ]
 
 
 def _format(rows):
@@ -105,8 +111,7 @@ def _format(rows):
     lines.append("  Top Kernels:")
     for k in r.get("top_kernels", []):
         lines.append(
-            f"    {k['name'][:50]:<52s}  {k['total_ms']:>8.1f}ms  "
-            f"×{k['count']}  ({k['pct']}%)"
+            f"    {k['name'][:50]:<52s}  {k['total_ms']:>8.1f}ms  ×{k['count']}  ({k['pct']}%)"
         )
 
     return "\n".join(lines)
@@ -126,7 +131,9 @@ SKILL = Skill(
     params=[
         SkillParam("iteration", "Iteration index (0-based)", "int", True, None),
         SkillParam("device", "GPU device ID", "int", False, 0),
-        SkillParam("marker", "NVTX marker for iteration boundary detection", "str", False, "sample_0"),
+        SkillParam(
+            "marker", "NVTX marker for iteration boundary detection", "str", False, "sample_0"
+        ),
     ],
     tags=["iteration", "detail", "breakdown", "variance", "nvtx", "drill-down"],
 )

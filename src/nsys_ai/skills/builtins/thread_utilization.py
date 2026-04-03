@@ -14,9 +14,10 @@ def _execute(conn: Any, *, limit: int = 10, **_kwargs):
     if isinstance(conn, _ddb.DuckDBPyConnection):
         tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
     else:
-        tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
 
     if "COMPOSITE_EVENTS" not in tables:
         return []
@@ -75,4 +76,3 @@ SKILL = Skill(
     format_fn=_format,
     tags=["cpu", "thread", "utilization", "bottleneck", "GIL"],
 )
-

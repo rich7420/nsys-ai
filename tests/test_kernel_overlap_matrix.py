@@ -16,7 +16,9 @@ from nsys_ai.skills.registry import get_skill
 @pytest.fixture
 def overlap_skill():
     skill = get_skill("kernel_overlap_matrix")
-    assert skill is not None, "kernel_overlap_matrix skill is not registered or could not be discovered"
+    assert skill is not None, (
+        "kernel_overlap_matrix skill is not registered or could not be discovered"
+    )
     return skill
 
 
@@ -39,8 +41,13 @@ class TestResultStructure:
     def test_required_keys(self, minimal_nsys_conn, overlap_skill):
         rows = overlap_skill.execute(minimal_nsys_conn, device=0)
         required = {
-            "category_a", "category_b", "overlap_ns", "overlap_ms",
-            "is_diagonal", "pct_of_a", "pct_of_b",
+            "category_a",
+            "category_b",
+            "overlap_ns",
+            "overlap_ms",
+            "is_diagonal",
+            "pct_of_a",
+            "pct_of_b",
         }
         for r in rows:
             assert required <= set(r.keys()), f"Missing keys in: {r}"
@@ -60,7 +67,9 @@ class TestOverlapDetection:
         """kernel_B [3-4ms] overlaps nccl_AllReduce [2.5-3.5ms] → 0.5ms overlap."""
         rows = overlap_skill.execute(minimal_nsys_conn, device=0)
         pair = _find_pair(rows, "compute", "nccl_allreduce")
-        assert pair is not None, f"compute × nccl_allreduce not found in {[r['category_a'] + '×' + r['category_b'] for r in rows]}"
+        assert pair is not None, (
+            f"compute × nccl_allreduce not found in {[r['category_a'] + '×' + r['category_b'] for r in rows]}"
+        )
         assert not pair["is_diagonal"]
         # Overlap should be ~0.5ms (500,000 ns)
         assert pair["overlap_ns"] == pytest.approx(500_000, abs=50_000)

@@ -65,6 +65,7 @@ def _execute(conn, **kwargs):
     # Fallback if device info is missing/empty
     if not gpu_name or gpu_name == "unknown":
         from ...profile import get_first_gpu_name
+
         gpu_name = get_first_gpu_name(conn) or "unknown"
     start_ns, end_ns = prof.meta.time_range
     # Use the trim window (if provided), clamped to the profile range,
@@ -75,9 +76,7 @@ def _execute(conn, **kwargs):
         effective_start_ns = max(effective_start_ns, trim_kwargs["trim_start_ns"])
         effective_end_ns = min(effective_end_ns, trim_kwargs["trim_end_ns"])
     profile_span_ns = (
-        effective_end_ns - effective_start_ns
-        if effective_end_ns > effective_start_ns
-        else 0
+        effective_end_ns - effective_start_ns if effective_end_ns > effective_start_ns else 0
     )
     profile_span_ms = round(profile_span_ns / 1e6, 1) if profile_span_ns > 0 else 0
 
@@ -104,19 +103,19 @@ def _execute(conn, **kwargs):
         name = r.get("demangled", "?")
         if len(name) > 60:
             name = name[:57] + "..."
-        top_kernels.append({
-            "name": name,
-            "total_ms": round(r.get("total_ns", 0) / 1e6, 2),
-            "count": r.get("count", 0),
-        })
+        top_kernels.append(
+            {
+                "name": name,
+                "total_ms": round(r.get("total_ns", 0) / 1e6, 2),
+                "count": r.get("count", 0),
+            }
+        )
 
     # Compute total kernel time over all kernels
     total_kernel_ms = sum(r.get("total_ns", 0) for r in agg_kernels) / 1e6
 
     # ── 3. Compute/NCCL overlap ──────────────────────────────────
-    overlap_rows = _safe_skill_run(
-        "overlap_breakdown", conn, device=device, **trim_kwargs
-    )
+    overlap_rows = _safe_skill_run("overlap_breakdown", conn, device=device, **trim_kwargs)
     overlap = {}
     if overlap_rows:
         ov = overlap_rows[0]
@@ -134,9 +133,7 @@ def _execute(conn, **kwargs):
             }
 
     # ── 4. NCCL breakdown (compact summary) ──────────────────────
-    nccl_rows = _safe_skill_run(
-        "nccl_breakdown", conn, device=device, **trim_kwargs
-    )
+    nccl_rows = _safe_skill_run("nccl_breakdown", conn, device=device, **trim_kwargs)
     nccl_summary = {"streams": 0, "collectives": 0}
     if nccl_rows:
         stream_ids = {r.get("stream_id") for r in nccl_rows}
@@ -146,14 +143,10 @@ def _execute(conn, **kwargs):
         dominant = max(nccl_rows, key=lambda r: r.get("total_ms", 0))
         nccl_summary["dominant_type"] = dominant.get("type", "?")
         nccl_summary["dominant_pct"] = dominant.get("pct", 0)
-        nccl_summary["total_nccl_ms"] = round(
-            sum(r.get("total_ms", 0) for r in nccl_rows), 1
-        )
+        nccl_summary["total_nccl_ms"] = round(sum(r.get("total_ms", 0) for r in nccl_rows), 1)
 
     # ── 5. GPU idle gaps (summary only) ──────────────────────────
-    idle_rows = _safe_skill_run(
-        "gpu_idle_gaps", conn, device=device, limit=1, **trim_kwargs
-    )
+    idle_rows = _safe_skill_run("gpu_idle_gaps", conn, device=device, limit=1, **trim_kwargs)
     idle_summary = {"gap_count": 0, "idle_pct": 0}
     summary_row = next((r for r in idle_rows if r.get("_summary")), None)
     if summary_row:
@@ -168,10 +161,12 @@ def _execute(conn, **kwargs):
         pattern = r.get("pattern", "")
         if pattern == "No Known Anti-Patterns Detected":
             continue
-        root_causes.append({
-            "pattern": pattern,
-            "severity": r.get("severity", "info"),
-        })
+        root_causes.append(
+            {
+                "pattern": pattern,
+                "severity": r.get("severity", "info"),
+            }
+        )
 
     sev_rank = {"critical": 0, "high": 1, "warning": 2, "medium": 3, "low": 4, "info": 5}
     root_causes.sort(key=lambda x: sev_rank.get(x["severity"].lower(), 99))
@@ -264,7 +259,9 @@ def _format(rows):
         lines.append("")
         lines.append("  NCCL Summary:")
         lines.append(f"    Streams: {nccl['streams']}, Collectives: {nccl['collectives']}")
-        lines.append(f"    Dominant: {nccl.get('dominant_type', '?')} ({nccl.get('dominant_pct', 0)}%)")
+        lines.append(
+            f"    Dominant: {nccl.get('dominant_type', '?')} ({nccl.get('dominant_pct', 0)}%)"
+        )
         lines.append(f"    Total: {nccl.get('total_nccl_ms', 0):.1f}ms")
 
     # Idle
