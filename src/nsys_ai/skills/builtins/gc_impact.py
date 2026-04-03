@@ -88,7 +88,7 @@ def _execute(conn, **kwargs):
         if "textId" in nvtx_cols:
             text_expr = "COALESCE(n.text, sid.value)"
             text_join = "LEFT JOIN StringIds sid ON n.textId = sid.id"
-            text_filter = f"({text_expr} LIKE '%GC%' OR {text_expr} LIKE '%garbage%')"
+            text_filter = f"(LOWER({text_expr}) LIKE '%gc%' OR LOWER({text_expr}) LIKE '%garbage%')"
             sql_nvtx = f"""
                 SELECT
                     {text_expr} AS event_name,
@@ -112,7 +112,7 @@ def _execute(conn, **kwargs):
                     ROUND(MAX("end" - start) / 1e6, 2) AS max_ms,
                     ROUND(AVG("end" - start) / 1e6, 2) AS avg_ms
                 FROM {nvtx_table}
-                WHERE (text LIKE '%GC%' OR text LIKE '%garbage%')
+                WHERE (LOWER(text) LIKE '%gc%' OR LOWER(text) LIKE '%garbage%')
                   AND eventType IN (59, 60)
                   {trim_clause_n}
                 GROUP BY text

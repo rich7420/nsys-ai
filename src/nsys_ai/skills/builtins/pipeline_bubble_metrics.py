@@ -12,10 +12,6 @@ from ..base import Skill, _resolve_activity_tables
 logger = logging.getLogger(__name__)
 
 
-class _NoDuckDB:
-    pass
-
-
 try:
     import duckdb
 
@@ -57,7 +53,7 @@ def _execute(conn, **kwargs):
             params_k = []
             trim_clause_k = ""
             if trim_start is not None and trim_end is not None:
-                trim_clause_k = 'WHERE start >= ? AND "end" <= ?'
+                trim_clause_k = 'WHERE "end" > ? AND start < ?'
                 params_k = [trim_start, trim_end]
 
             kernel_rows = conn.execute(
@@ -74,7 +70,7 @@ def _execute(conn, **kwargs):
             params_m = []
             trim_clause_m = ""
             if trim_start is not None and trim_end is not None:
-                trim_clause_m = 'WHERE start >= ? AND "end" <= ?'
+                trim_clause_m = 'WHERE "end" > ? AND start < ?'
                 params_m = [trim_start, trim_end]
             memcpy_rows = conn.execute(
                 f'SELECT deviceId, start, "end" FROM {memcpy_table} {trim_clause_m}',
@@ -90,7 +86,7 @@ def _execute(conn, **kwargs):
             params_s = []
             trim_clause_s = ""
             if trim_start is not None and trim_end is not None:
-                trim_clause_s = 'WHERE start >= ? AND "end" <= ?'
+                trim_clause_s = 'WHERE "end" > ? AND start < ?'
                 params_s = [trim_start, trim_end]
             memset_rows = conn.execute(
                 f'SELECT deviceId, start, "end" FROM {memset_table} {trim_clause_s}',
@@ -103,12 +99,14 @@ def _execute(conn, **kwargs):
     from collections import defaultdict
 
     by_device: dict[int, list[tuple[int, int]]] = defaultdict(list)
-    for dev, s, e in kernel_rows:
-        by_device[dev].append((s, e))
-    for dev, s, e in memcpy_rows:
-        by_device[dev].append((s, e))
-    for dev, s, e in memset_rows:
-        by_device[dev].append((s, e))
+    for rows in (kernel_rows, memcpy_rows, memset_rows):
+        for dev, s, e in rows:
+            if trim_start is not None:
+                s = max(s, trim_start)
+            if trim_end is not None:
+                e = min(e, trim_end)
+            if s < e:
+                by_device[dev].append((s, e))
 
     if not by_device:
         return []

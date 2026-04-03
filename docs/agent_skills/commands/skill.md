@@ -275,7 +275,7 @@ No required parameters. Supports `--trim`.
 
 | Skill | Title | Description |
 |-------|-------|-------------|
-| `pipeline_bubble_metrics` | Pipeline Bubble Metrics (True Idle %) | Merges all overlapping kernel and memcpy intervals per GPU to compute exact active time vs. true idle time. Reports `Bubble %` — the fraction of GPU wall-time with zero activity. Essential input for MFU calculation. Uses O(n log n) Python interval merging. |
+| `pipeline_bubble_metrics` | Pipeline Bubble Metrics (True Idle %) | Merges all overlapping kernel, memcpy, and memset intervals per GPU to compute exact active time vs. true idle time. Reports `Bubble %` — the fraction of GPU wall-time with zero activity. Essential input for MFU calculation. Uses O(n log n) Python interval merging. |
 
 `pipeline_bubble_metrics` has no required parameters. Supports `--trim`.
 
