@@ -1,5 +1,3 @@
-
-
 def test_module_loading_execute(minimal_nsys_conn):
     """Test module_loading skill executes and correctly aggregates JIT events."""
     from nsys_ai.skills.registry import get_skill
