@@ -5,6 +5,7 @@ dist/
 .pytest_cache/
 .DS_Store
 .venv/
+.venv-gpu/
 
 # Generated outputs (use `out/` for viewer/timeline-html/export -o)
 out/
@@ -17,6 +18,7 @@ timeline_viewer.html
 
 *.sqlite
 *.nsys-rep
+*.nsys-cache/
 examples/*/output/
 snapshot_report.html
 uv.lock

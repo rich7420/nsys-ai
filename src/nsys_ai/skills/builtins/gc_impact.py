@@ -80,10 +80,13 @@ def _execute(conn, **kwargs):
         # Handle both text and textId schemas
         try:
             import duckdb as _ddb
+
             if isinstance(conn, _ddb.DuckDBPyConnection):
                 nvtx_cols = [r[0] for r in conn.execute("DESCRIBE NVTX_EVENTS").fetchall()]
             else:
-                nvtx_cols = [r[1] for r in conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()]
+                nvtx_cols = [
+                    r[1] for r in conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()
+                ]
         except Exception:
             nvtx_cols = []
 
@@ -122,8 +125,7 @@ def _execute(conn, **kwargs):
         try:
             rows_nvtx = conn.execute(sql_nvtx, params_n).fetchall()
             results.extend(
-                dict(zip(cols, r)) if isinstance(r, tuple) else dict(r)
-                for r in rows_nvtx
+                dict(zip(cols, r)) if isinstance(r, tuple) else dict(r) for r in rows_nvtx
             )
         except Exception:
             pass  # NVTX query is best-effort

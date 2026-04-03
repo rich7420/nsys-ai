@@ -106,8 +106,11 @@ def test_agent_guide():
 def test_skill_info():
     """skill info subcommand should return a JSON schema."""
     import json
+
     result = subprocess.run(
-        [sys.executable, "-m", "nsys_ai", "skill", "info", "top_kernels"], capture_output=True, text=True
+        [sys.executable, "-m", "nsys_ai", "skill", "info", "top_kernels"],
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 0
     schema = json.loads(result.stdout)
@@ -163,9 +166,19 @@ def test_skill_run_duckdb_cache(tmp_path):
     conn.close()
 
     result = subprocess.run(
-        [sys.executable, "-m", "nsys_ai", "skill", "run", "schema_inspect",
-         str(db_path), "--format", "json"],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            "-m",
+            "nsys_ai",
+            "skill",
+            "run",
+            "schema_inspect",
+            str(db_path),
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 0, f"stderr: {result.stderr}\nstdout: {result.stdout}"
     rows = json.loads(result.stdout)
@@ -179,4 +192,3 @@ def test_skill_run_duckdb_cache(tmp_path):
     assert cache_dir.exists(), f"Cache directory {cache_dir} was not created"
     parquet_files = list(cache_dir.glob("*.parquet"))
     assert len(parquet_files) >= 1, "No .parquet files found in cache directory"
-

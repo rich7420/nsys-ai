@@ -106,13 +106,15 @@ def _execute(conn, **kwargs):
         bubble_ns = total_span - active_ns
         bubble_pct = 100.0 * bubble_ns / total_span if total_span > 0 else 0.0
 
-        results.append({
-            "deviceId": dev,
-            "total_span_ms": round(total_span / 1e6, 2),
-            "active_ms": round(active_ns / 1e6, 2),
-            "bubble_ms": round(bubble_ns / 1e6, 2),
-            "bubble_pct": round(bubble_pct, 2),
-        })
+        results.append(
+            {
+                "deviceId": dev,
+                "total_span_ms": round(total_span / 1e6, 2),
+                "active_ms": round(active_ns / 1e6, 2),
+                "bubble_ms": round(bubble_ns / 1e6, 2),
+                "bubble_pct": round(bubble_pct, 2),
+            }
+        )
 
     return results
 

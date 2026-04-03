@@ -84,7 +84,15 @@ def _classify_h2d_pattern(rows: list, kwargs: dict | None = None) -> dict:
                     f"Check timeline at those timestamps for unexpected data movement."
                 ),
                 "spike_seconds": [r["second"] for r in spikes],
-                "spikes": [{"second": r["second"], "total_mb": r["total_mb"], "window_start": r.get("window_start"), "window_end": r.get("window_end")} for r in spikes],
+                "spikes": [
+                    {
+                        "second": r["second"],
+                        "total_mb": r["total_mb"],
+                        "window_start": r.get("window_start"),
+                        "window_end": r.get("window_end"),
+                    }
+                    for r in spikes
+                ],
                 "gpu_id": gpu_id,
             }
 
@@ -142,9 +150,7 @@ H2D_DIST_SKILL = Skill(
         "and continuous data feeding in the training/inference loop."
     ),
     category="memory",
-    params=[
-        SkillParam("device", "GPU device ID", "int", False, 0)
-    ],
+    params=[SkillParam("device", "GPU device ID", "int", False, 0)],
     sql="""\
 WITH baseline AS (
     SELECT MIN(k.start) AS min_start
@@ -166,8 +172,10 @@ ORDER BY 1""",
     tags=["memory", "transfer", "H2D", "distribution", "time", "leak"],
 )
 
+
 def _to_findings_dist(rows: list[dict]) -> list:
     from nsys_ai.annotation import Finding
+
     findings = []
 
     pattern = next((r for r in rows if r.get("_pattern")), None)
@@ -176,7 +184,9 @@ def _to_findings_dist(rows: list[dict]) -> list:
 
     if pattern.get("type") == "spike":
         # Cap at top 5 spikes by size to avoid unbounded findings on long profiles.
-        spikes = sorted(pattern.get("spikes", []), key=lambda s: s.get("total_mb", 0), reverse=True)[:5]
+        spikes = sorted(
+            pattern.get("spikes", []), key=lambda s: s.get("total_mb", 0), reverse=True
+        )[:5]
         for spike in spikes:
             start = spike.get("window_start")
             end = spike.get("window_end")
@@ -196,6 +206,7 @@ def _to_findings_dist(rows: list[dict]) -> list:
 
 
 H2D_DIST_SKILL.to_findings_fn = _to_findings_dist
+
 
 # Replace the direct SQL with a safe execute_fn for the module
 def _execute_h2d_dist(conn, **kwargs):
@@ -222,6 +233,7 @@ def _execute_h2d_dist(conn, **kwargs):
     )
 
     from nsys_ai.exceptions import SkillExecutionError
+
     try:
         rows = temp_skill.execute(conn, **kwargs)
     except SkillExecutionError as exc:

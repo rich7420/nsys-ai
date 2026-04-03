@@ -1,6 +1,5 @@
 """Tests for evidence build CLI and EvidenceBuilder.only parameter."""
 
-
 from nsys_ai.evidence_builder import EvidenceBuilder
 
 
@@ -65,6 +64,4 @@ class TestEvidenceBuilderOnly:
 
         for name, (skill_name, params) in EvidenceBuilder._SKILL_PIPELINE.items():
             skill = get_skill(skill_name)
-            assert skill is not None, (
-                f"Missing skill {skill_name} for analyzer '{name}'"
-            )
+            assert skill is not None, f"Missing skill {skill_name} for analyzer '{name}'"

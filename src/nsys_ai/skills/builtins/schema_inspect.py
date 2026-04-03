@@ -5,6 +5,7 @@ from ..base import Skill
 
 def _execute(conn, **kwargs):
     import duckdb
+
     if isinstance(conn, duckdb.DuckDBPyConnection):
         cur = conn.execute(
             """
@@ -35,6 +36,7 @@ def _execute(conn, **kwargs):
         cur = conn.execute(sql)
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
 
 def _format(rows):
     if not rows:

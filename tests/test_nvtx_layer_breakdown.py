@@ -154,9 +154,24 @@ def test_root_cause_layer_nccl_hotspot():
 
     # Simulate: layer_1_bwd has 80ms NCCL, layer_0_bwd has 5ms NCCL
     layer_data = [
-        {"nvtx_region": "layer_1_bwd", "nccl_ms": 80, "compute_ms": 10, "nvtx_path": "backward > layer_1_bwd"},
-        {"nvtx_region": "layer_0_bwd", "nccl_ms": 5, "compute_ms": 15, "nvtx_path": "backward > layer_0_bwd"},
-        {"nvtx_region": "attention", "nccl_ms": 0, "compute_ms": 30, "nvtx_path": "forward > attention"},
+        {
+            "nvtx_region": "layer_1_bwd",
+            "nccl_ms": 80,
+            "compute_ms": 10,
+            "nvtx_path": "backward > layer_1_bwd",
+        },
+        {
+            "nvtx_region": "layer_0_bwd",
+            "nccl_ms": 5,
+            "compute_ms": 15,
+            "nvtx_path": "backward > layer_0_bwd",
+        },
+        {
+            "nvtx_region": "attention",
+            "nccl_ms": 0,
+            "compute_ms": 30,
+            "nvtx_path": "forward > attention",
+        },
     ]
     findings = _check_layer_nccl_hotspot(layer_data)
     assert len(findings) >= 1
@@ -416,20 +431,23 @@ def test_root_cause_layer_outlier():
     # Use 6+ normal layers so Q3 stays at ~12, IQR~2, fence=15,
     # and 100 > 15 AND 100 > 12*1.5=18 → both True.
     layer_data = [
-        {"nvtx_region": "layer_0", "total_gpu_ms": 10.0, "compute_ms": 10.0,
-         "top_kernels": [{"kernel_name": "gemm_k", "total_ms": 8.0}]},
-        {"nvtx_region": "layer_1", "total_gpu_ms": 10.5, "compute_ms": 10.5,
-         "top_kernels": []},
-        {"nvtx_region": "layer_2", "total_gpu_ms": 11.0, "compute_ms": 11.0,
-         "top_kernels": []},
-        {"nvtx_region": "layer_3", "total_gpu_ms": 11.5, "compute_ms": 11.5,
-         "top_kernels": []},
-        {"nvtx_region": "layer_4", "total_gpu_ms": 12.0, "compute_ms": 12.0,
-         "top_kernels": []},
-        {"nvtx_region": "layer_5", "total_gpu_ms": 12.5, "compute_ms": 12.5,
-         "top_kernels": []},
-        {"nvtx_region": "layer_heavy", "total_gpu_ms": 100.0, "compute_ms": 100.0,
-         "top_kernels": [{"kernel_name": "slow_kernel", "total_ms": 90.0}]},
+        {
+            "nvtx_region": "layer_0",
+            "total_gpu_ms": 10.0,
+            "compute_ms": 10.0,
+            "top_kernels": [{"kernel_name": "gemm_k", "total_ms": 8.0}],
+        },
+        {"nvtx_region": "layer_1", "total_gpu_ms": 10.5, "compute_ms": 10.5, "top_kernels": []},
+        {"nvtx_region": "layer_2", "total_gpu_ms": 11.0, "compute_ms": 11.0, "top_kernels": []},
+        {"nvtx_region": "layer_3", "total_gpu_ms": 11.5, "compute_ms": 11.5, "top_kernels": []},
+        {"nvtx_region": "layer_4", "total_gpu_ms": 12.0, "compute_ms": 12.0, "top_kernels": []},
+        {"nvtx_region": "layer_5", "total_gpu_ms": 12.5, "compute_ms": 12.5, "top_kernels": []},
+        {
+            "nvtx_region": "layer_heavy",
+            "total_gpu_ms": 100.0,
+            "compute_ms": 100.0,
+            "top_kernels": [{"kernel_name": "slow_kernel", "total_ms": 90.0}],
+        },
     ]
     findings = _check_layer_outlier(layer_data)
     assert len(findings) >= 1
@@ -450,4 +468,3 @@ def test_root_cause_layer_outlier_no_fire():
     ]
     findings = _check_layer_outlier(layer_data)
     assert len(findings) == 0
-

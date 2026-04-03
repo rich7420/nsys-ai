@@ -65,7 +65,9 @@ def _to_findings(rows: list[dict]) -> list:
                     label=f"Slow Iteration {it.get('iteration', '?')}",
                     start_ns=start_ns,
                     end_ns=end_ns,
-                    gpu_id=it.get("device_id", 0),  # Assuming device_id is available or defaults to 0
+                    gpu_id=it.get(
+                        "device_id", 0
+                    ),  # Assuming device_id is available or defaults to 0
                     severity="warning",
                     note=(
                         f"{it['duration_ms']:.1f}ms "

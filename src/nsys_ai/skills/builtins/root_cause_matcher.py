@@ -394,8 +394,9 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
 
                 # Single query: check if ANY sync call starts within 1ms
                 # after ANY NCCL kernel's end time (avoids N+1 loop).
-                found = conn.execute(sqlite_to_duckdb(
-                    f"""
+                found = conn.execute(
+                    sqlite_to_duckdb(
+                        f"""
                     SELECT 1 FROM {kernel_tbl} k
                     JOIN StringIds s ON k.shortName = s.id
                     WHERE (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
@@ -408,7 +409,9 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
                       )
                     LIMIT 1
                     """
-                ), [device] + sync_id_list).fetchone()
+                    ),
+                    [device] + sync_id_list,
+                ).fetchone()
                 if found:
                     return {
                         "cause": "sync_after_nccl",
@@ -428,9 +431,7 @@ def _diagnose_low_overlap(conn: sqlite3.Connection, **kwargs) -> dict:
 # -----------------------------------------------------------------------
 
 
-def _check_layer_nccl_hotspot(
-    layer_data: list[dict], threshold_pct: float = 40.0
-) -> list[dict]:
+def _check_layer_nccl_hotspot(layer_data: list[dict], threshold_pct: float = 40.0) -> list[dict]:
     """Detect when one NVTX region dominates total NCCL time.
 
     Args:
@@ -467,9 +468,7 @@ def _check_layer_nccl_hotspot(
     return findings
 
 
-def _check_pipeline_imbalance(
-    layer_data: list[dict], threshold_ratio: float = 3.0
-) -> list[dict]:
+def _check_pipeline_imbalance(layer_data: list[dict], threshold_ratio: float = 3.0) -> list[dict]:
     """Detect compute time imbalance across NVTX layers.
 
     Args:
@@ -477,7 +476,8 @@ def _check_pipeline_imbalance(
     """
     # Only consider layers with measurable compute
     compute_layers = [
-        r for r in layer_data
+        r
+        for r in layer_data
         if r.get("compute_ms", 0) > 0.01  # > 10µs
     ]
     if len(compute_layers) < 2:
@@ -548,8 +548,7 @@ def _check_layer_outlier(
             hotspot_info = ""
             if top_k:
                 hotspot_info = (
-                    f" Top kernel: '{top_k[0]['kernel_name']}'"
-                    f" ({top_k[0]['total_ms']:.1f}ms)."
+                    f" Top kernel: '{top_k[0]['kernel_name']}' ({top_k[0]['total_ms']:.1f}ms)."
                 )
 
             findings.append(
@@ -586,6 +585,7 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
     so we use LIKE prefix matching via a two-step nameId resolution.
     """
     from ...sql_compat import sqlite_to_duckdb
+
     tables = _resolve_activity_tables(conn)
     runtime_tbl = tables.get("runtime")
     kernel_tbl = tables.get("kernel")
@@ -594,13 +594,15 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
 
     try:
         # Step 1: resolve nameIds from StringIds (fast, tiny table)
-        sync_names = conn.execute(sqlite_to_duckdb("""
+        sync_names = conn.execute(
+            sqlite_to_duckdb("""
             SELECT id, value FROM StringIds
             WHERE value LIKE 'cudaDeviceSynchronize%'
                OR value LIKE 'cudaStreamSynchronize%'
                OR value LIKE 'cudaEventSynchronize%'
                OR value LIKE 'cudaStreamWaitEvent%'
-        """)).fetchall()
+        """)
+        ).fetchall()
         if not sync_names:
             return []
 
@@ -608,13 +610,15 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         placeholders = ",".join(str(nid) for nid in name_ids)
 
         # Step 2: count sync calls by nameId (fast with index)
-        rows = conn.execute(sqlite_to_duckdb(f"""
+        rows = conn.execute(
+            sqlite_to_duckdb(f"""
             SELECT nameId, COUNT(*) AS call_count,
                    SUM([end] - start) AS total_ns
             FROM {runtime_tbl}
             WHERE nameId IN ({placeholders})
             GROUP BY nameId
-        """)).fetchall()
+        """)
+        ).fetchall()
         if not rows:
             return []
 
@@ -629,7 +633,9 @@ def _check_sync_apis(conn: sqlite3.Connection, **kwargs):
         # Total GPU kernel time as baseline for percentage threshold
         total_gpu_ns = 0
         if kernel_tbl:
-            gpu_row = conn.execute(sqlite_to_duckdb(f"SELECT SUM([end] - start) FROM {kernel_tbl}")).fetchone()
+            gpu_row = conn.execute(
+                sqlite_to_duckdb(f"SELECT SUM([end] - start) FROM {kernel_tbl}")
+            ).fetchone()
             total_gpu_ns = gpu_row[0] or 0 if gpu_row else 0
 
         # Percentage-based threshold: sync time > 2% of total GPU time
@@ -667,6 +673,7 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
     We match any name starting with 'cudaMemcpy' but NOT 'cudaMemcpyAsync'.
     """
     from ...sql_compat import sqlite_to_duckdb
+
     tables = _resolve_activity_tables(conn)
     runtime_tbl = tables.get("runtime")
     memcpy_tbl = tables.get("memcpy")
@@ -675,11 +682,13 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
 
     try:
         # Step 1: find nameIds for sync cudaMemcpy (NOT async)
-        sync_names = conn.execute(sqlite_to_duckdb("""
+        sync_names = conn.execute(
+            sqlite_to_duckdb("""
             SELECT id, value FROM StringIds
             WHERE value LIKE 'cudaMemcpy%'
               AND value NOT LIKE 'cudaMemcpyAsync%'
-        """)).fetchall()
+        """)
+        ).fetchall()
         if not sync_names:
             return []
 
@@ -687,14 +696,16 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
         placeholders = ",".join(str(nid) for nid in name_ids)
 
         # Step 2: find memcpy ops correlated with sync runtime calls
-        row = conn.execute(sqlite_to_duckdb(f"""
+        row = conn.execute(
+            sqlite_to_duckdb(f"""
             SELECT COUNT(*) AS count,
                    COALESCE(SUM(m.bytes), 0) AS total_bytes,
                    COALESCE(SUM(m.[end] - m.start), 0) AS total_ns
             FROM {runtime_tbl} r
             JOIN {memcpy_tbl} m ON r.correlationId = m.correlationId
             WHERE r.nameId IN ({placeholders})
-        """)).fetchone()
+        """)
+        ).fetchone()
         if not row or row[0] == 0:
             return []
 
@@ -734,19 +745,22 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
     Source: CUPTI_ACTIVITY_KIND_MEMCPY table schema, Nsight Systems export.
     """
     from ...sql_compat import sqlite_to_duckdb
+
     tables = _resolve_activity_tables(conn)
     memcpy_tbl = tables.get("memcpy")
     if not memcpy_tbl:
         return []
 
     try:
-        row = conn.execute(sqlite_to_duckdb(f"""
+        row = conn.execute(
+            sqlite_to_duckdb(f"""
             SELECT COUNT(*) AS pageable_count,
                    COALESCE(SUM(bytes), 0) AS total_bytes,
                    COALESCE(SUM([end] - start), 0) AS total_ns
             FROM {memcpy_tbl}
             WHERE srcKind = 1 OR dstKind = 1
-        """)).fetchone()
+        """)
+        ).fetchone()
         if not row or row[0] == 0:
             return []
 
@@ -784,6 +798,7 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
     We match any name starting with 'cudaMemset' but NOT 'cudaMemsetAsync'.
     """
     from ...sql_compat import sqlite_to_duckdb
+
     tables = _resolve_activity_tables(conn)
     runtime_tbl = tables.get("runtime")
     memset_tbl = tables.get("memset")
@@ -792,11 +807,13 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
 
     try:
         # Step 1: find nameIds for sync cudaMemset (NOT async)
-        sync_names = conn.execute(sqlite_to_duckdb("""
+        sync_names = conn.execute(
+            sqlite_to_duckdb("""
             SELECT id, value FROM StringIds
             WHERE value LIKE 'cudaMemset%'
               AND value NOT LIKE 'cudaMemsetAsync%'
-        """)).fetchall()
+        """)
+        ).fetchall()
         if not sync_names:
             return []
 
@@ -804,13 +821,15 @@ def _check_sync_memset(conn: sqlite3.Connection, **kwargs):
         placeholders = ",".join(str(nid) for nid in name_ids)
 
         # Step 2: find memset ops correlated with sync runtime calls
-        row = conn.execute(sqlite_to_duckdb(f"""
+        row = conn.execute(
+            sqlite_to_duckdb(f"""
             SELECT COUNT(*) AS count,
                    COALESCE(SUM(ms.[end] - ms.start), 0) AS total_ns
             FROM {runtime_tbl} r
             JOIN {memset_tbl} ms ON r.correlationId = ms.correlationId
             WHERE r.nameId IN ({placeholders})
-        """)).fetchone()
+        """)
+        ).fetchone()
         if not row or row[0] == 0:
             return []
 
@@ -847,6 +866,7 @@ def _safe_execute(skill_name, conn: sqlite3.Connection, **kwargs):
     error_types = [sqlite3.Error, SkillExecutionError]
     try:
         import duckdb
+
         error_types.extend([duckdb.Error, duckdb.CatalogException])
     except ImportError:
         pass

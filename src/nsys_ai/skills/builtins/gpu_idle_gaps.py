@@ -110,6 +110,7 @@ LIMIT ?"""
     import duckdb
 
     from ...sql_compat import sqlite_to_duckdb
+
     try:
         cur = conn.execute(sqlite_to_duckdb(gap_sql), trim_params + [min_gap_ns, limit])
         cols = [d[0] for d in cur.description]
@@ -119,18 +120,20 @@ LIMIT ?"""
         return []
 
     if not rows:
-        return [{
-            "_summary": True,
-            "gap_count": 0,
-            "total_idle_ms": 0,
-            "pct_of_profile": 0,
-            "min_gap_threshold_ns": min_gap_ns,
-            "note": (
-                f"No GPU idle gaps >= {min_gap_ns / 1e6:.1f}ms found. "
-                "GPU is well-utilized — this is a good result, not an error. "
-                "To find smaller gaps, try lowering min_gap_ns (e.g. -p min_gap_ns=100000)."
-            ),
-        }]
+        return [
+            {
+                "_summary": True,
+                "gap_count": 0,
+                "total_idle_ms": 0,
+                "pct_of_profile": 0,
+                "min_gap_threshold_ns": min_gap_ns,
+                "note": (
+                    f"No GPU idle gaps >= {min_gap_ns / 1e6:.1f}ms found. "
+                    "GPU is well-utilized — this is a good result, not an error. "
+                    "To find smaller gaps, try lowering min_gap_ns (e.g. -p min_gap_ns=100000)."
+                ),
+            }
+        ]
 
     # --- Phase 2: Aggregation stats ---
     # Re-query without LIMIT to get full aggregation
@@ -166,12 +169,16 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
     # the number of active streams to avoid pct > 100%.
     try:
         time_range = conn.execute(
-            sqlite_to_duckdb(f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"),
+            sqlite_to_duckdb(
+                f"SELECT MIN(k.start), MAX(k.[end]) FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"
+            ),
             trim_params,
         ).fetchone()
         profile_span_ns = (time_range[1] or 0) - (time_range[0] or 0)
         stream_count_row = conn.execute(
-            sqlite_to_duckdb(f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"),
+            sqlite_to_duckdb(
+                f"SELECT COUNT(DISTINCT k.streamId) AS n FROM {kernel_tbl} AS k WHERE k.deviceId = ? {trim_clause}"
+            ),
             trim_params,
         ).fetchone()
         n_streams = stream_count_row[0] if stream_count_row else 1
@@ -207,8 +214,9 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             gap_start = gap["start_ns"]
             gap_end = gap["end_ns"]
             try:
-                cur_api = conn.execute(sqlite_to_duckdb(
-                    f"""\
+                cur_api = conn.execute(
+                    sqlite_to_duckdb(
+                        f"""\
 SELECT s.value AS api_name, COUNT(*) AS call_count,
        SUM(r.[end] - r.start) AS total_ns
 FROM {runtime_tbl} r
@@ -217,7 +225,9 @@ WHERE r.start < ? AND r.[end] > ?
 GROUP BY s.value
 ORDER BY total_ns DESC
 LIMIT 5"""
-                ), (gap_end, gap_start))
+                    ),
+                    (gap_end, gap_start),
+                )
                 api_rows = cur_api.fetchall()
                 api_cols = [d[0] for d in cur_api.description]
                 apis = [dict(zip(api_cols, r)) for r in api_rows]

@@ -329,7 +329,6 @@ def duckdb_conn():
     db.close()
 
 
-
 # ---------------------------------------------------------------------------
 # Enhanced fixture with nested NVTX hierarchy (multi-layer)
 # ---------------------------------------------------------------------------
@@ -481,4 +480,3 @@ def emit_nvtx_conn():
     conn.executescript(_EMIT_NVTX_SEED_SQL)
     yield conn
     conn.close()
-
