@@ -24,21 +24,6 @@ def _format(rows):
     return "\n".join(lines)
 
 
-def _merge_intervals(intervals: list[tuple[int, int]]) -> tuple[int, list[tuple[int, int]]]:
-    """Merge overlapping intervals. Returns (total_active_ns, merged_list)."""
-    if not intervals:
-        return 0, []
-    intervals.sort()
-    merged = [intervals[0]]
-    for start, end in intervals[1:]:
-        if start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    total = sum(e - s for s, e in merged)
-    return total, merged
-
-
 def _execute(conn, **kwargs):
     tables = _resolve_activity_tables(conn)
     kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
@@ -47,23 +32,22 @@ def _execute(conn, **kwargs):
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
 
-    # Verify kernel table exists
-    try:
-        conn.execute(f"SELECT 1 FROM {kernel_table} LIMIT 1")
-    except Exception:
-        return []
+    # --- Fetch kernel intervals per device (if available) ---
+    kernel_rows = []
+    if kernel_table:
+        try:
+            params_k = []
+            trim_clause_k = ""
+            if trim_start is not None and trim_end is not None:
+                trim_clause_k = 'WHERE start >= ? AND "end" <= ?'
+                params_k = [trim_start, trim_end]
 
-    # --- Fetch kernel intervals per device ---
-    params_k = []
-    trim_clause_k = ""
-    if trim_start is not None and trim_end is not None:
-        trim_clause_k = 'WHERE start >= ? AND "end" <= ?'
-        params_k = [trim_start, trim_end]
-
-    kernel_rows = conn.execute(
-        f'SELECT deviceId, start, "end" FROM {kernel_table} {trim_clause_k}',
-        params_k,
-    ).fetchall()
+            kernel_rows = conn.execute(
+                f'SELECT deviceId, start, "end" FROM {kernel_table} {trim_clause_k}',
+                params_k,
+            ).fetchall()
+        except Exception:
+            pass
 
     # --- Fetch memcpy intervals per device (if available) ---
     memcpy_rows = []
@@ -93,13 +77,17 @@ def _execute(conn, **kwargs):
     if not by_device:
         return []
 
+    from nsys_ai.overlap import merge_intervals, total_covered
+
     # --- Merge intervals and compute bubble metrics per device ---
     results = []
     for dev in sorted(by_device):
         intervals = by_device[dev]
-        active_ns, merged = _merge_intervals(intervals)
+        merged = merge_intervals(intervals)
         if not merged:
             continue
+
+        active_ns = total_covered(merged)
         global_start = merged[0][0]
         global_end = merged[-1][1]
         total_span = global_end - global_start

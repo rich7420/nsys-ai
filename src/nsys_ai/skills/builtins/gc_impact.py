@@ -63,14 +63,9 @@ def _execute(conn, **kwargs):
     results = [dict(zip(cols, r)) if isinstance(r, tuple) else dict(r) for r in rows_runtime]
 
     # --- Part 2: NVTX events mentioning GC ---
-    has_nvtx = False
-    try:
-        conn.execute("SELECT 1 FROM NVTX_EVENTS LIMIT 1")
-        has_nvtx = True
-    except Exception:
-        pass
+    nvtx_table = tables.get("nvtx")
 
-    if has_nvtx:
+    if nvtx_table:
         params_n = []
         trim_clause_n = ""
         if trim_start is not None and trim_end is not None:
@@ -82,10 +77,10 @@ def _execute(conn, **kwargs):
             import duckdb as _ddb
 
             if isinstance(conn, _ddb.DuckDBPyConnection):
-                nvtx_cols = [r[0] for r in conn.execute("DESCRIBE NVTX_EVENTS").fetchall()]
+                nvtx_cols = [r[0] for r in conn.execute(f"DESCRIBE {nvtx_table}").fetchall()]
             else:
                 nvtx_cols = [
-                    r[1] for r in conn.execute("PRAGMA table_info(NVTX_EVENTS)").fetchall()
+                    r[1] for r in conn.execute(f"PRAGMA table_info({nvtx_table})").fetchall()
                 ]
         except Exception:
             nvtx_cols = []
@@ -101,7 +96,7 @@ def _execute(conn, **kwargs):
                     ROUND(SUM(n."end" - n.start) / 1e6, 2) AS total_ms,
                     ROUND(MAX(n."end" - n.start) / 1e6, 2) AS max_ms,
                     ROUND(AVG(n."end" - n.start) / 1e6, 2) AS avg_ms
-                FROM NVTX_EVENTS n
+                FROM {nvtx_table} n
                 {text_join}
                 WHERE {text_filter}
                   AND n.eventType IN (59, 60)
@@ -116,7 +111,7 @@ def _execute(conn, **kwargs):
                     ROUND(SUM("end" - start) / 1e6, 2) AS total_ms,
                     ROUND(MAX("end" - start) / 1e6, 2) AS max_ms,
                     ROUND(AVG("end" - start) / 1e6, 2) AS avg_ms
-                FROM NVTX_EVENTS
+                FROM {nvtx_table}
                 WHERE (text LIKE '%GC%' OR text LIKE '%garbage%')
                   AND eventType IN (59, 60)
                   {trim_clause_n}
