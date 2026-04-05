@@ -121,7 +121,7 @@ def _execute(conn, **kwargs):
                 total_kernel_ns += (current_end - current_start)
                 current_start = s
                 current_end = e
-                
+
         if current_start != -1:
             total_kernel_ns += (current_end - current_start)
 
