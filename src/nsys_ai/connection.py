@@ -56,7 +56,8 @@ class SQLiteAdapter:
 
     def detect_nvtx_text_id(self) -> bool:
         try:
-            cur = self.conn.execute("PRAGMA table_info(NVTX_EVENTS)")
+            nvtx_table = self.resolve_activity_tables().get("nvtx", "NVTX_EVENTS")
+            cur = self.conn.execute(f"PRAGMA table_info({nvtx_table})")
             cols = [row[1] for row in cur.fetchall()]
             return "textId" in cols
         except sqlite3.Error as exc:
@@ -101,12 +102,12 @@ class DuckDBAdapter:
 
     def detect_nvtx_text_id(self) -> bool:
         try:
-            tables = {row[0] for row in self.conn.execute("SHOW TABLES").fetchall()}
-            if "NVTX_EVENTS" not in tables:
+            nvtx_table = self.resolve_activity_tables().get("nvtx")
+            if not nvtx_table:
                 return False
 
             # Use DESCRIBE for duckdb
-            cols = [row[0] for row in self.conn.execute("DESCRIBE NVTX_EVENTS").fetchall()]
+            cols = [row[0] for row in self.conn.execute(f"DESCRIBE {nvtx_table}").fetchall()]
             return "textId" in cols
         except Exception as exc:
             _log.debug("NVTX textId detection failed (duckdb): %s", exc, exc_info=True)

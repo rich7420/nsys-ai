@@ -261,8 +261,6 @@ class Profile:
 
         kernel_table = self.schema.kernel_table
 
-        kernel_table = self.schema.kernel_table
-
         devices = [
             r[0]
             for r in self.adapter.execute(
