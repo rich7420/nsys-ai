@@ -136,31 +136,7 @@ class Skill:
             # No trim requested — replace with empty string
             resolved["trim_clause"] = ""
 
-        # Inject resolved activity table names for versioned-table support.
-        # SQL templates use {kernel_table} etc. instead of hardcoding
-        # CUPTI_ACTIVITY_KIND_KERNEL which may be _KERNEL_V2/_V3 in
-        # newer Nsight Systems versions.
-        tables = adapter.resolve_activity_tables()
-        resolved.setdefault(
-            "kernel_table",
-            tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL"),
-        )
-        resolved.setdefault(
-            "runtime_table",
-            tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME"),
-        )
-        resolved.setdefault(
-            "nvtx_table",
-            tables.get("nvtx", "NVTX_EVENTS"),
-        )
-        resolved.setdefault(
-            "memcpy_table",
-            tables.get("memcpy", "CUPTI_ACTIVITY_KIND_MEMCPY"),
-        )
-        resolved.setdefault(
-            "memset_table",
-            tables.get("memset", "CUPTI_ACTIVITY_KIND_MEMSET"),
-        )
+
 
         # Compute profiler overhead union duration dynamically.
         # Try the SELECT directly and catch DB_ERRORS if the table is absent,
@@ -208,6 +184,32 @@ class Skill:
             return self.execute_fn(conn, **resolved)
 
         # --- SQL Execution Path ---
+        # Inject resolved activity table names for versioned-table support.
+        # SQL templates use {kernel_table} etc. instead of hardcoding
+        # CUPTI_ACTIVITY_KIND_KERNEL which may be _KERNEL_V2/_V3 in
+        # newer Nsight Systems versions.
+        tables = adapter.resolve_activity_tables()
+        resolved.setdefault(
+            "kernel_table",
+            tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL"),
+        )
+        resolved.setdefault(
+            "runtime_table",
+            tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME"),
+        )
+        resolved.setdefault(
+            "nvtx_table",
+            tables.get("nvtx", "NVTX_EVENTS"),
+        )
+        resolved.setdefault(
+            "memcpy_table",
+            tables.get("memcpy", "CUPTI_ACTIVITY_KIND_MEMCPY"),
+        )
+        resolved.setdefault(
+            "memset_table",
+            tables.get("memset", "CUPTI_ACTIVITY_KIND_MEMSET"),
+        )
+
         # NVTX text resolution: handle both legacy (text column only)
         # and modern schemas (textId → StringIds lookup).
         if "{nvtx_text_expr}" in self.sql or "{nvtx_text_join}" in self.sql:

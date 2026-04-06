@@ -82,10 +82,12 @@ def _execute(conn, **kwargs):
     profile_span_ms = round(profile_span_ns / 1e6, 1) if profile_span_ns > 0 else 0
 
     overhead_ms = round(overhead_ns / 1e6, 1)
-    overhead_pct = round(overhead_ns / profile_span_ns * 100, 1) if profile_span_ns > 0 else 0
+    overhead_pct_raw = (overhead_ns / profile_span_ns * 100) if profile_span_ns > 0 else 0
+    overhead_pct = round(overhead_pct_raw, 1)
     data_quality = {
         "profiler_overhead_ms": overhead_ms,
-        "overhead_pct": overhead_pct
+        "overhead_pct": overhead_pct,
+        "overhead_pct_raw": overhead_pct_raw,
     }
 
     # ── 2. Top kernels (compact: top 5 only) ─────────────────────
@@ -204,8 +206,9 @@ def _execute(conn, **kwargs):
 def _infer_bottleneck(m: dict) -> str:
     """Heuristic bottleneck inference from manifest data."""
     dq = m.get("data_quality", {})
-    if dq.get("overhead_pct", 0) > 1.0:
-        return f"Profiler Overhead ({dq['overhead_pct']}%) contaminated the profile"
+    overhead_pct_val = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
+    if overhead_pct_val > 1.0:
+        return f"Profiler Overhead ({dq.get('overhead_pct', overhead_pct_val)}%) contaminated the profile"
 
     overlap = m.get("overlap", {})
     idle = m.get("idle", {})
