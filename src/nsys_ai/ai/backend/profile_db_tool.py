@@ -246,8 +246,12 @@ def get_profile_schema(
                 cur = adapter.execute(f"DESCRIBE {table}")
                 cols = [f"  {r[0]} {r[1]}" for r in cur.fetchall()]
                 parts.append(f"CREATE TABLE {table} (\n" + ",\n".join(cols) + "\n);")
-            except Exception:
-                pass
+            except Exception as e:
+                # Only swallow DuckDB database errors cleanly. Propagate others or log them.
+                if type(e).__name__ in ("CatalogException", "Error", "ParserException"):
+                    pass
+                else:
+                    raise
         return "\n\n".join(parts) if parts else "(Could not read schema from DuckDB.)"
 
     # Standard SQLite path

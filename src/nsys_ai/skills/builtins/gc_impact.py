@@ -1,6 +1,6 @@
 """Detect Python Garbage Collection and intensive memory free stalls."""
 
-from nsys_ai.connection import wrap_connection
+from nsys_ai.connection import DB_ERRORS, wrap_connection
 
 from ..base import Skill
 
@@ -34,7 +34,7 @@ def _execute(conn, **kwargs):
 
     try:
         adapter.execute(f"SELECT 1 FROM {runtime_table} LIMIT 1")
-    except Exception:
+    except DB_ERRORS:
         return []
 
     # --- Part 1: CUDA Memory APIs from Runtime table ---
@@ -78,7 +78,7 @@ def _execute(conn, **kwargs):
         # Handle both text and textId schemas
         try:
             nvtx_cols = adapter.get_table_columns(nvtx_table)
-        except Exception:
+        except DB_ERRORS:
             nvtx_cols = []
 
         if "textId" in nvtx_cols:
@@ -118,7 +118,7 @@ def _execute(conn, **kwargs):
             results.extend(
                 dict(zip(cols, r)) if isinstance(r, tuple) else dict(r) for r in rows_nvtx
             )
-        except Exception:
+        except DB_ERRORS:
             pass  # NVTX query is best-effort
 
     # Sort combined results by total_ms descending

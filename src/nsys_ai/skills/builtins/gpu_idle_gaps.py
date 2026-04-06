@@ -14,6 +14,14 @@ from ..base import Skill, SkillParam
 
 _log = logging.getLogger(__name__)
 
+# Narrow exception tuple for diagnostic query blocks.
+_DB_ERRORS: tuple[type[Exception], ...] = (sqlite3.Error, sqlite3.OperationalError)
+try:
+    import duckdb  # noqa: E402
+    _DB_ERRORS = _DB_ERRORS + (duckdb.Error,)
+except ImportError:
+    pass
+
 # Gap classification rules based on dominant CUDA Runtime API during the gap
 # NOTE: More specific patterns (e.g. cudaMemcpyAsync) must appear BEFORE
 # less specific ones (e.g. cudaMemcpy) since matching uses substring search.
@@ -94,7 +102,7 @@ LIMIT ?"""
         cur = adapter.execute(gap_sql, trim_params + [min_gap_ns, limit])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-    except Exception as e:
+    except _DB_ERRORS as e:
         _log.debug("gpu_idle_gaps: %s", e, exc_info=True)
         return []
 
@@ -139,7 +147,7 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             agg = dict(zip(agg_cols, agg_row))
         else:
             agg = {}
-    except Exception as exc:
+    except _DB_ERRORS as exc:
         _log.debug("gpu_idle_gaps aggregation query failed: %s", exc, exc_info=True)
         agg = {}
 
@@ -157,7 +165,7 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
             trim_params,
         ).fetchone()
         n_streams = stream_count_row[0] if stream_count_row else 1
-    except Exception as exc:
+    except _DB_ERRORS as exc:
         _log.debug("gpu_idle_gaps profile span query failed: %s", exc, exc_info=True)
         profile_span_ns = 0
         n_streams = 1
@@ -204,7 +212,7 @@ LIMIT 5""",
                 api_rows = cur_api.fetchall()
                 api_cols = [d[0] for d in cur_api.description]
                 apis = [dict(zip(api_cols, r)) for r in api_rows]
-            except Exception as exc:
+            except _DB_ERRORS as exc:
                 _log.debug("gpu_idle_gaps CPU attribution query failed: %s", exc, exc_info=True)
                 apis = []
 

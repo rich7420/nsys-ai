@@ -1,5 +1,7 @@
 """Top GPU kernels by total execution time."""
 
+from nsys_ai.connection import DB_ERRORS
+
 from ..base import Skill, SkillParam
 
 
@@ -37,7 +39,7 @@ def _execute(conn, **kwargs):
     try:
         conn.execute("SELECT 1 FROM kernels LIMIT 1")
         has_kernels = True
-    except Exception:
+    except DB_ERRORS:
         has_kernels = False
 
     params = []

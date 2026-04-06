@@ -3,6 +3,14 @@ import re
 import sqlite3
 from typing import Any, Protocol, runtime_checkable
 
+# Narrow exception tuple for diagnostic query blocks.
+DB_ERRORS: tuple[type[Exception], ...] = (sqlite3.Error, sqlite3.OperationalError)
+try:
+    import duckdb  # noqa: E402
+    DB_ERRORS = DB_ERRORS + (duckdb.Error,)
+except ImportError:
+    pass
+
 _log = logging.getLogger(__name__)
 
 # Defence-in-depth: reject identifiers with special chars even though

@@ -1,6 +1,6 @@
 """Detect JIT compilation and module loading stalls."""
 
-from nsys_ai.connection import wrap_connection
+from nsys_ai.connection import DB_ERRORS, wrap_connection
 
 from ..base import Skill
 
@@ -33,7 +33,7 @@ def _execute(conn, **kwargs):
 
     try:
         conn.execute(f"SELECT 1 FROM {runtime_table} LIMIT 1")
-    except Exception:
+    except DB_ERRORS:
         return []
 
     params = []
