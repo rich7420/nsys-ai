@@ -9,7 +9,28 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from ..connection import DB_ERRORS
+
 _log = logging.getLogger(__name__)
+
+
+def _compute_interval_union(intervals: list[tuple[int, int]]) -> int:
+    """Computes the total non-overlapping duration of a list of [start, end] intervals."""
+    if not intervals:
+        return 0
+    intervals.sort(key=lambda x: x[0])
+    total_ns = 0
+    current_start, current_end = intervals[0]
+
+    for start, end in intervals[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+        else:
+            total_ns += current_end - current_start
+            current_start, current_end = start, end
+
+    total_ns += current_end - current_start
+    return total_ns
 
 # Track connections that have already been indexed to avoid repeated work.
 _indexed_connections: set[int] = set()
@@ -104,12 +125,7 @@ class Skill:
             elif p.required:
                 raise ValueError(f"Skill '{self.name}' requires parameter '{p.name}'")
 
-        # Python-level skill: delegate to execute_fn with resolved params.
-        if self.execute_fn is not None:
-            return self.execute_fn(conn, **resolved)
-
-        # SQL skill: further augment resolved params and run query
-        # Handle {trim_clause} injection
+        # Handle {trim_clause} injection before execute_fn so {overhead_ns} can be computed correctly
         trim_start = resolved.get("trim_start_ns")
         trim_end = resolved.get("trim_end_ns")
         if trim_start is not None and trim_end is not None and "{trim_clause}" in self.sql:
@@ -146,6 +162,47 @@ class Skill:
             tables.get("memset", "CUPTI_ACTIVITY_KIND_MEMSET"),
         )
 
+        # Compute profiler overhead union duration dynamically
+        overhead_ns = 0
+        try:
+            table_names = adapter.get_table_names()
+            oh_table = None
+            if "profiler_overhead" in table_names:
+                oh_table = "profiler_overhead"
+            elif "PROFILER_OVERHEAD" in table_names:
+                oh_table = "PROFILER_OVERHEAD"
+
+            if oh_table:
+                conds = []
+                if trim_start is not None:
+                    conds.append(f"[end] >= {int(trim_start)}")
+                if trim_end is not None:
+                    conds.append(f"start <= {int(trim_end)}")
+
+                where_clause = "WHERE " + " AND ".join(conds) if conds else ""
+                cur = adapter.execute(f"SELECT start, [end] FROM {oh_table} {where_clause}")
+                rows = cur.fetchall()
+                if rows:
+                    intervals = []
+                    for row in rows:
+                        s, e = int(row[0]), int(row[1])
+                        if trim_start is not None:
+                            s = max(s, int(trim_start))
+                        if trim_end is not None:
+                            e = min(e, int(trim_end))
+                        if s < e:
+                            intervals.append((s, e))
+                    overhead_ns = _compute_interval_union(intervals)
+        except DB_ERRORS as exc:
+            _log.debug("Failed to calculate profiler overhead: %s", exc)
+
+        resolved["overhead_ns"] = overhead_ns
+
+        # Python-level skill: delegate to execute_fn with resolved params.
+        if self.execute_fn is not None:
+            return self.execute_fn(conn, **resolved)
+
+        # --- SQL Execution Path ---
         # NVTX text resolution: handle both legacy (text column only)
         # and modern schemas (textId → StringIds lookup).
         if "{nvtx_text_expr}" in self.sql or "{nvtx_text_join}" in self.sql:
