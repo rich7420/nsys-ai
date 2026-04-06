@@ -18,6 +18,11 @@ _log = logging.getLogger(__name__)
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+def is_safe_identifier(name: str) -> bool:
+    """Check if the string is safe to be structurally spliced into a SQL query."""
+    return bool(_SAFE_IDENT_RE.match(name))
+
+
 @runtime_checkable
 class ConnectionAdapter(Protocol):
     """Abstracts SQLite and DuckDB connections for cross-engine compatibility."""
@@ -102,7 +107,7 @@ class DuckDBAdapter:
     def resolve_activity_tables(self) -> dict[str, str]:
         try:
             tables = {row[0] for row in self.conn.execute("SHOW TABLES").fetchall()}
-        except Exception as exc:
+        except DB_ERRORS as exc:
             _log.debug("Failed to resolve activity tables (duckdb): %s", exc, exc_info=True)
             return {}
         return _find_activity_tables(tables)
@@ -115,12 +120,12 @@ class DuckDBAdapter:
 
             cols = self.get_table_columns(nvtx_table)
             return "textId" in cols
-        except (Exception, ValueError) as exc:
+        except DB_ERRORS + (ValueError,) as exc:
             _log.debug("NVTX textId detection failed (duckdb): %s", exc, exc_info=True)
             return False
 
     def get_table_columns(self, table_name: str) -> list[str]:
-        if not _SAFE_IDENT_RE.match(table_name):
+        if not is_safe_identifier(table_name):
             raise ValueError(f"Unsafe table name: {table_name!r}")
         cur = self.conn.execute(f"DESCRIBE {table_name}")
         return [row[0] for row in cur.fetchall()]
@@ -128,7 +133,8 @@ class DuckDBAdapter:
     def get_table_names(self) -> set[str]:
         try:
             return {row[0] for row in self.conn.execute("SHOW TABLES").fetchall()}
-        except Exception:
+        except DB_ERRORS as exc:
+            _log.debug("Failed to get table names (duckdb): %s", exc, exc_info=True)
             return set()
 
 

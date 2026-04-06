@@ -131,8 +131,8 @@ def query_profile_db(
             table_token = rest.split(None, 1)[0] if rest else ""
             table_name = table_token.strip("'\"`[]")
 
-            from nsys_ai.connection import _SAFE_IDENT_RE
-            if not _SAFE_IDENT_RE.match(table_name):
+            from nsys_ai.connection import is_safe_identifier
+            if not is_safe_identifier(table_name):
                 return f"Error: Invalid or unsafe table name '{table_name}'."
 
             q = f"PRAGMA table_info('{table_name}')"
@@ -238,7 +238,7 @@ def get_profile_schema(
 
     parts = []
 
-    from nsys_ai.connection import DuckDBAdapter, wrap_connection
+    from nsys_ai.connection import DB_ERRORS, DuckDBAdapter, wrap_connection
     adapter = wrap_connection(conn)
     is_duckdb = isinstance(adapter, DuckDBAdapter)
 
@@ -250,12 +250,8 @@ def get_profile_schema(
                 cur = adapter.execute(f"DESCRIBE {table}")
                 cols = [f"  {r[0]} {r[1]}" for r in cur.fetchall()]
                 parts.append(f"CREATE TABLE {table} (\n" + ",\n".join(cols) + "\n);")
-            except Exception as e:
-                # Only swallow DuckDB database errors cleanly. Propagate others or log them.
-                if type(e).__name__ in ("CatalogException", "Error", "ParserException"):
-                    pass
-                else:
-                    raise
+            except DB_ERRORS:
+                pass
         return "\n\n".join(parts) if parts else "(Could not read schema from DuckDB.)"
 
     # Standard SQLite path

@@ -16,20 +16,11 @@ to gather evidence, then matches against known patterns.
 import logging
 import sqlite3
 
-from nsys_ai.connection import wrap_connection
+from nsys_ai.connection import DB_ERRORS, wrap_connection
 
 from ..base import Skill, SkillParam
 
 _log = logging.getLogger(__name__)
-
-# Narrow exception tuple for diagnostic query blocks.
-# Catches only expected DB errors so programming bugs propagate.
-_DB_ERRORS: tuple[type[Exception], ...] = (sqlite3.Error, sqlite3.OperationalError)
-try:
-    import duckdb  # noqa: E402
-    _DB_ERRORS = _DB_ERRORS + (duckdb.Error,)
-except ImportError:
-    pass
 
 
 def _execute(conn: sqlite3.Connection, **kwargs):
