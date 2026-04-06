@@ -246,8 +246,9 @@ def _format(rows):
     lines.append(f"  Profile span: {m.get('profile_span_ms', 0):.1f}ms")
 
     dq = m.get("data_quality", {})
-    if dq.get("overhead_pct", 0) >= 0.1:
-        lines.append(f"  ⚠️ Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms ({dq.get('overhead_pct', 0)}% of span)")
+    overhead_pct_raw = dq.get("overhead_pct_raw", dq.get("overhead_pct", 0))
+    if overhead_pct_raw >= 0.1:
+        lines.append(f"  ⚠️ Profiler Overhead: {dq.get('profiler_overhead_ms', 0):.1f}ms ({dq.get('overhead_pct', overhead_pct_raw)}% of span)")
 
     # Top kernels
     lines.append("")
