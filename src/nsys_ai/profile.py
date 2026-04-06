@@ -643,7 +643,7 @@ class Profile:
         is_duckdb = isinstance(adapter, DuckDBAdapter)
 
         if not is_duckdb and not getattr(self, "_warned_sqlite_fallback", False):
-            self._log.warning("DuckDB unavailable, falling back to SQLite (slower)")
+            self._log.warning("DuckDB cache unavailable or not in use; falling back to SQLite (slower)")
             self._warned_sqlite_fallback = True
 
         with self._lock:

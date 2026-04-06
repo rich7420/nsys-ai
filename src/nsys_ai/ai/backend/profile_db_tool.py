@@ -130,8 +130,12 @@ def query_profile_db(
             rest = q[9:].strip()
             table_token = rest.split(None, 1)[0] if rest else ""
             table_name = table_token.strip("'\"`[]")
-            safe_table_name = table_name.replace("'", "''")
-            q = f"PRAGMA table_info('{safe_table_name}')"
+
+            from nsys_ai.connection import _SAFE_IDENT_RE
+            if not _SAFE_IDENT_RE.match(table_name):
+                return f"Error: Invalid or unsafe table name '{table_name}'."
+
+            q = f"PRAGMA table_info('{table_name}')"
             upper = q.upper()
 
     # Adapter handles sqlite_to_duckdb automatically, so we don't need manual translation here anymore
