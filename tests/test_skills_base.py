@@ -35,10 +35,10 @@ def test_profiler_overhead_probing_and_trimming():
         title="Dummy",
         description="Dummy description",
         category="utility",
-        execute_fn=lambda conn, **kwargs: kwargs
+        execute_fn=lambda conn, **kwargs: [kwargs]
     )
     res_no_table = dummy_skill.execute(conn)
-    assert res_no_table["overhead_ns"] == 0
+    assert res_no_table[0]["overhead_ns"] == 0
 
     # 2. Create the PROFILER_OVERHEAD table with some intervals
     conn.execute("CREATE TABLE PROFILER_OVERHEAD (start INTEGER, [end] INTEGER)")
@@ -50,7 +50,7 @@ def test_profiler_overhead_probing_and_trimming():
     # Executing the skill should now calculate overhead
     # Union of [100, 300] and [500, 600] = 200 + 100 = 300 ns
     res_with_table = dummy_skill.execute(conn)
-    assert res_with_table["overhead_ns"] == 300
+    assert res_with_table[0]["overhead_ns"] == 300
 
     # 3. Test trimming window (trim_start_ns=200, trim_end_ns=550)
     # The intervals should be clamped explicitly or ignored:
@@ -59,4 +59,4 @@ def test_profiler_overhead_probing_and_trimming():
     # 500->600 becomes 500->550 (duration 50)
     # Expected union = 150 ns
     res_trimmed = dummy_skill.execute(conn, trim_start_ns=200, trim_end_ns=550)
-    assert res_trimmed["overhead_ns"] == 150
+    assert res_trimmed[0]["overhead_ns"] == 150

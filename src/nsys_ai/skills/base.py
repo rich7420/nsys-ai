@@ -18,11 +18,11 @@ def _compute_interval_union(intervals: list[tuple[int, int]]) -> int:
     """Computes the total non-overlapping duration of a list of [start, end] intervals."""
     if not intervals:
         return 0
-    intervals.sort(key=lambda x: x[0])
+    sorted_intervals = sorted(intervals, key=lambda x: x[0])
     total_ns = 0
-    current_start, current_end = intervals[0]
+    current_start, current_end = sorted_intervals[0]
 
-    for start, end in intervals[1:]:
+    for start, end in sorted_intervals[1:]:
         if start <= current_end:
             current_end = max(current_end, end)
         else:
