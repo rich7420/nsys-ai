@@ -23,6 +23,52 @@ from ..base import Skill, SkillParam
 _log = logging.getLogger(__name__)
 
 
+def _resolve_active_device(conn, kwargs: dict) -> dict:
+    """Return kwargs with 'device' set to an active GPU if the current one has no kernels.
+
+    Multi-GPU profiles (e.g. Megatron) often have device 0 unused while devices
+    1-7 run all computation.  Without this fallback, root-cause patterns that
+    depend on per-device kernel data silently produce empty results.
+    """
+    try:
+        from ...connection import wrap_connection
+        adapter = wrap_connection(conn)
+        kernel_table = adapter.resolve_activity_tables().get(
+            "kernel", "CUPTI_ACTIVITY_KIND_KERNEL"
+        )
+
+        current_device = kwargs.get("device", 0)
+
+        # Build optional trim filter (use "end" not [end] for DuckDB compat)
+        trim_conds: list[str] = []
+        trim_params: list = []
+        if "trim_start_ns" in kwargs:
+            trim_conds.append("start >= ?")
+            trim_params.append(kwargs["trim_start_ns"])
+        if "trim_end_ns" in kwargs:
+            trim_conds.append('"end" <= ?')
+            trim_params.append(kwargs["trim_end_ns"])
+        trim_sql = f" AND {' AND '.join(trim_conds)}" if trim_conds else ""
+
+        cur_count = adapter.execute(
+            f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ?{trim_sql}",
+            [current_device] + trim_params,
+        ).fetchone()[0]
+
+        if cur_count == 0:
+            active_devs = adapter.execute(
+                f"SELECT deviceId, COUNT(*) as c FROM {kernel_table} "
+                f"WHERE 1=1{trim_sql} "
+                f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
+                trim_params,
+            ).fetchall()
+            if active_devs and active_devs[0][0] != current_device:
+                return {**kwargs, "device": active_devs[0][0]}
+    except Exception:
+        pass
+    return kwargs
+
+
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Run all pattern matchers against the profile."""
     findings = []
@@ -33,10 +79,20 @@ def _execute(conn: sqlite3.Connection, **kwargs):
     top_kernels_data = _safe_execute("top_kernels", conn, limit=1000, **kwargs)
     # GPU idle gaps
     idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
+
+    # If the current device has no kernels, pivot to an active device and re-fetch.
+    resolved_kwargs = _resolve_active_device(conn, kwargs)
+    if resolved_kwargs.get("device") != kwargs.get("device", 0):
+        kwargs = resolved_kwargs
+        top_kernels_data = _safe_execute("top_kernels", conn, limit=1000, **kwargs)
+        idle_gaps_data = _safe_execute("gpu_idle_gaps", conn, **kwargs)
+
     # Overlap
     overlap_data = _safe_execute("overlap_breakdown", conn, **kwargs)
     # Kernel launch overhead
     launch_data = _safe_execute("kernel_launch_overhead", conn, **kwargs)
+    # Sync Cost
+    sync_data = _safe_execute("sync_cost_analysis", conn, **kwargs)
 
     # --- GPU Bubbles (Pipeline Stalls) ---
     if idle_gaps_data:
@@ -93,6 +149,22 @@ def _execute(conn: sqlite3.Connection, **kwargs):
             )
             if pct > 0:
                 evidence += f" ({pct}% of profile)"
+
+            # If Sync Cost Analysis indicates massive CPU blockage, overwrite the guess!
+            if sync_data and "error" not in sync_data[0]:
+                sync_ms = sync_data[0].get("total_sync_wall_ms", 0)
+                sync_density = sync_data[0].get("sync_density_pct", 0)
+                # If sync time accounts for more than half of the idle time, or > 15% of profile:
+                if (total_idle_ms > 0 and sync_ms / total_idle_ms > 0.5) or sync_density > 15.0:
+                    rec = (
+                        "Critical Over-Synchronization Detected. "
+                        f"{sync_density:.1f}% of this profile is CPU-blocked by synchronization calls "
+                        f"(torch.cuda.synchronize / cudaDeviceSynchronize). "
+                        "Action: (1) Remove unnecessary sync calls, "
+                        "(2) replace device-wide sync with stream-scoped cudaStreamWaitEvent, "
+                        "(3) ensure .item() or .cpu() calls are deferred to avoid implicit sync."
+                    )
+                    evidence += f". Validated via explicit CPU sync stall of {sync_ms:.1f}ms"
 
             findings.append(
                 {
