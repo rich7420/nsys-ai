@@ -41,7 +41,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
         from ...connection import wrap_connection
         adapter = wrap_connection(conn)
         kernel_table = adapter.resolve_activity_tables().get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
-        
+
         current_device = kwargs.get("device", 0)
         trim_conds = []
         trim_params = []
@@ -51,15 +51,15 @@ def _execute(conn: sqlite3.Connection, **kwargs):
         if "trim_end_ns" in kwargs:
             trim_conds.append("[end] <= ?")
             trim_params.append(kwargs["trim_end_ns"])
-            
+
         trim_sql = f" AND {' AND '.join(trim_conds)}" if trim_conds else ""
-        
+
         # Check current device kernel count
         cur_count = conn.execute(
             f"SELECT COUNT(*) FROM {kernel_table} WHERE deviceId = ? {trim_sql}",
             [current_device] + trim_params
         ).fetchone()[0]
-        
+
         if cur_count == 0:
             # Find an active device
             active_devs = conn.execute(
@@ -68,7 +68,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 f"GROUP BY deviceId HAVING c > 0 ORDER BY c DESC LIMIT 1",
                 trim_params
             ).fetchall()
-            
+
             if active_devs and active_devs[0][0] != current_device:
                 active_device = active_devs[0][0]
                 kwargs = {**kwargs, "device": active_device}
