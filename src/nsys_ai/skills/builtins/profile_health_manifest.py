@@ -8,7 +8,9 @@ Internally orchestrates: overlap_breakdown, nccl_breakdown,
 gpu_idle_gaps, and root_cause_matcher.
 """
 
+import dataclasses
 import logging
+from datetime import datetime, timezone
 
 from ..base import Skill, SkillParam
 
@@ -192,8 +194,9 @@ def _execute(conn, **kwargs):
 
     # ── Assemble manifest ────────────────────────────────────────
     manifest = {
+        "analysis_time_utc": datetime.now(timezone.utc).isoformat() + "Z",
         "gpu": gpu_name,
-        "fingerprint": prof.fingerprint.__dict__ if prof.fingerprint else None,
+        "fingerprint": dataclasses.asdict(prof.fingerprint) if prof.fingerprint else None,
         "profile_span_ms": profile_span_ms,
         "top_kernels": top_kernels,
         "total_kernel_ms": round(total_kernel_ms, 1),
