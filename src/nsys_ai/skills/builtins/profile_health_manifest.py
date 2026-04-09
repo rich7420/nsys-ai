@@ -194,7 +194,7 @@ def _execute(conn, **kwargs):
 
     # ── Assemble manifest ────────────────────────────────────────
     manifest = {
-        "analysis_time_utc": datetime.now(timezone.utc).isoformat() + "Z",
+        "analysis_time_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "gpu": gpu_name,
         "fingerprint": dataclasses.asdict(prof.fingerprint) if prof.fingerprint else None,
         "profile_span_ms": profile_span_ms,
