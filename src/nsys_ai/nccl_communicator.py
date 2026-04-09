@@ -12,10 +12,10 @@ followed by the payload bytes referenced by `NVTX_PAYLOAD_SCHEMAS` and
 
 from __future__ import annotations
 
-from collections import defaultdict
-from dataclasses import dataclass
 import os
 import sqlite3
+from collections import defaultdict
+from dataclasses import dataclass
 
 from .connection import DB_ERRORS
 from .profile import Profile, get_first_gpu_name

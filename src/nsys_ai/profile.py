@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 if typing.TYPE_CHECKING:
     from .fingerprint import ProfileFingerprint
 
-import duckdb
 
 from nsys_ai import parquet_cache
 from nsys_ai.exceptions import (
