@@ -690,10 +690,6 @@ class Profile:
         if db is self.conn:
             return
 
-        # If db is just an alias to a borrowed conn, do not close it.
-        if db is self.conn and not getattr(self, "_owns_conn", True):
-            return
-
         try:
             db.close()
         except Exception:
@@ -746,6 +742,8 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
                 nsys_exe,
                 "export",
                 "--type=sqlite",
+                # Always explicitly request payload blobs so communicator
+                # analysis and other payload-dependent features function.
                 "--include-blobs=true",
                 "-o",
                 out,
@@ -889,7 +887,8 @@ def _sqlite_needs_blob_reexport(path: str) -> bool:
             ).fetchone()
             return has_payload is None
     except sqlite3.Error:
-        return False
+        # If the file is unreadable or corrupt, we cannot use it
+        return True
 
 
 def get_first_gpu_name(conn) -> str:

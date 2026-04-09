@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,8 @@ log = logging.getLogger(__name__)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
 _CACHE_VERSION = 7  # bumped: preserve NVTX blobs and payload schema tables
+
+_SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # Tables to export as-is from SQLite → Parquet.
 # (view_name, source_table_name)
@@ -420,6 +423,10 @@ def open_cached_db(sqlite_path: str) -> duckdb.DuckDBPyConnection:
 def open_parquetdir_db(parquetdir_path: str) -> duckdb.DuckDBPyConnection:
     """Open a DuckDB connection over an Nsight `parquetdir` export."""
     parquet_dir = Path(parquetdir_path)
+    if not parquet_dir.is_dir():
+        raise RuntimeError(
+            f"Parquet directory path does not exist or is not a directory: {parquet_dir}"
+        )
     parquet_files = sorted(parquet_dir.glob("*.parquet"))
     if not parquet_files:
         raise RuntimeError(
@@ -500,16 +507,22 @@ def _register_parquetdir_tables(
     """
     for parquet_file in parquet_files:
         table_name = parquet_file.stem
+        # Validate table name to prevent SQL injection from unexpected filenames.
+        if not _SAFE_PARQUETDIR_NAME_RE.match(table_name):
+            log.warning("Skipping parquet file with unsafe name: %s", parquet_file.name)
+            continue
+        # Escape double-quotes in identifiers as defence-in-depth.
+        safe_name = table_name.replace('"', '""')
         if table_name in _PARQUETDIR_BINARY_COLUMNS:
             arrow_name = f"_parquetdir_{table_name}"
             table = _load_parquet_table_for_duckdb(parquet_file, table_name)
             db.register(arrow_name, table)
-            db.execute(f'CREATE VIEW "{table_name}" AS SELECT * FROM "{arrow_name}"')
+            db.execute(f'CREATE VIEW "{safe_name}" AS SELECT * FROM "{arrow_name}"')
             continue
 
         safe_fpath = str(parquet_file).replace("'", "''")
         db.execute(
-            f'CREATE VIEW "{table_name}" AS SELECT * FROM read_parquet(\'{safe_fpath}\')'
+            f'CREATE VIEW "{safe_name}" AS SELECT * FROM read_parquet(\'{safe_fpath}\')'
         )
 
 
