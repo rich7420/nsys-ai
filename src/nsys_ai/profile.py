@@ -717,14 +717,26 @@ def resolve_profile_path(path: str, *, backend: str = "sqlite") -> str:
 
     # Reuse an existing up-to-date SQLite export if possible.
     out = path[:-9] + ".sqlite"  # .nsys-rep -> .sqlite
-    if (
+    reuse_by_mtime = (
         os.path.exists(path)
         and os.path.exists(out)
         and os.path.getsize(out) > 0
         and os.path.getmtime(out) >= os.path.getmtime(path)
-        and not _sqlite_needs_blob_reexport(out)
-    ):
-        return out
+    )
+    if reuse_by_mtime:
+        if not _sqlite_needs_blob_reexport(out):
+            return out
+        # Missing NVTX payload blobs: re-export only when nsys is available so we
+        # do not regress users with a valid sidecar .sqlite but no Nsight install.
+        if not shutil.which("nsys"):
+            logging.getLogger(__name__).warning(
+                "Reusing existing SQLite export at %r without NVTX payload blobs; "
+                "communicator-aware analysis and other payload-dependent features may be incomplete. "
+                "Install Nsight Systems and re-export with: nsys export --type sqlite "
+                "--include-blobs=true -o <out.sqlite> --force-overwrite=true <file.nsys-rep>",
+                out,
+            )
+            return out
 
     nsys_exe = shutil.which("nsys")
     if not nsys_exe:
@@ -829,7 +841,7 @@ def _resolve_parquetdir_path(path: str) -> str:
         raise ExportTimeoutError(
             "nsys export timed out after 300 seconds while producing a parquetdir export. "
             "Try running the export manually to inspect the full output:\n"
-            f"  nsys export --type parquetdir --include-blobs=true -o {out} {path}\n"
+            f"  nsys export --type parquetdir --include-blobs=true --force-overwrite=true -o {out} {path}\n"
         ) from e
     except subprocess.CalledProcessError as e:
         raise ExportError(
