@@ -87,7 +87,14 @@ def _sort_merge_attribute(
         return []
     min_r_start = min(int(r[1]) for r in kr_rows)
     max_r_end = max(int(r[2]) for r in kr_rows)
-    placeholders = ",".join("?" for _ in tids)
+    # SQLite has a default limit of 999 bound parameters; if we exceed it,
+    # drop the TID whitelist and rely solely on the time-window filter.
+    if len(tids) <= 900:
+        tid_clause = f"AND n.globalTid IN ({','.join('?' for _ in tids)})"
+        nvtx_params: tuple = tuple(tids) + (max_r_end, min_r_start)
+    else:
+        tid_clause = ""
+        nvtx_params = (max_r_end, min_r_start)
     nvtx_rows = adapter.execute(
         f"""
         SELECT n.globalTid, n.start, n.[end], {text_expr} AS text
@@ -95,12 +102,12 @@ def _sort_merge_attribute(
         {text_join}
         WHERE n.eventType = 59
           AND n.[end] > n.start
-          AND n.globalTid IN ({placeholders})
+          {tid_clause}
           AND n.start <= ?
           AND n.[end] >= ?
         ORDER BY n.globalTid, n.start
         """,
-        tuple(tids) + (max_r_end, min_r_start),
+        nvtx_params,
     ).fetchall()
 
     # StringIds lookup for kernel names — only fetch the IDs we need

@@ -33,12 +33,17 @@ def is_safe_identifier(name: str) -> bool:
 
 _PROBE_MISS = object()
 _duck_probe_bags: weakref.WeakKeyDictionary[Any, dict[str, Any]] = weakref.WeakKeyDictionary()
-_sqlite_probe_bags: dict[int, dict[str, Any]] = {}
+# sqlite3.Connection is not weak-referenceable, so we key by the connection
+# object itself (identity hash).  This keeps a strong reference for the
+# lifetime of the process, which is acceptable in a short-lived CLI.  Using
+# the object directly avoids the id()-reuse hazard (id() can be recycled
+# after a connection is closed and GC'd, giving false cache hits).
+_sqlite_probe_bags: dict[sqlite3.Connection, dict[str, Any]] = {}
 
 
 def _probe_cache_get(conn, key: str):
     if isinstance(conn, sqlite3.Connection):
-        bag = _sqlite_probe_bags.get(id(conn))
+        bag = _sqlite_probe_bags.get(conn)
         if bag is None:
             return _PROBE_MISS
         return bag.get(key, _PROBE_MISS)
@@ -50,7 +55,7 @@ def _probe_cache_get(conn, key: str):
 
 def _probe_cache_set(conn, key: str, value) -> None:
     if isinstance(conn, sqlite3.Connection):
-        _sqlite_probe_bags.setdefault(id(conn), {})[key] = value
+        _sqlite_probe_bags.setdefault(conn, {})[key] = value
         return
     try:
         _duck_probe_bags.setdefault(conn, {})[key] = value

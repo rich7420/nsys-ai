@@ -85,16 +85,21 @@ class TestBuildAndOpen:
             dict_file = cache_dir / "nvtx_path_dict.parquet"
             assert dict_file.is_file()
             db = parquet_cache.open_cached_db(minimal_nsys_db_path)
-            joined = db.execute(
+            result = db.execute(
                 """
                 SELECT m.path_id, d.nvtx_path
                 FROM nvtx_kernel_map m
                 JOIN nvtx_path_dict d USING (path_id)
                 LIMIT 5
                 """
-            ).fetchall()
+            )
+            joined = result.fetchall()
             assert isinstance(joined, list)
-            assert len(joined) > 0
+            assert [col[0] for col in result.description] == ["path_id", "nvtx_path"]
+            if joined:
+                assert len(joined[0]) == 2
+                assert isinstance(joined[0][0], int)
+                assert joined[0][1] is None or isinstance(joined[0][1], str)
             db.close()
 
     def test_invalidate_cache(self, minimal_nsys_db_path):

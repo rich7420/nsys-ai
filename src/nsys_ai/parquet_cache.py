@@ -899,6 +899,15 @@ def _build_nvtx_kernel_map(
             WHERE eventType = 59 AND "end" > start AND text IS NOT NULL
         """)
         db.execute(f"CREATE OR REPLACE TEMP TABLE _nkm_grouped AS {grouped_sql}")
+        has_rows = bool(
+            db.execute("SELECT EXISTS (SELECT 1 FROM _nkm_grouped)").fetchone()[0]
+        )
+        if not has_rows:
+            log.info(
+                "nvtx_kernel_map pure SQL produced no NVTX/kernel attribution; "
+                "skipping parquet map creation"
+            )
+            return
         db.execute("""
             CREATE OR REPLACE TEMP TABLE _nkm_path_dict AS
             SELECT nvtx_path, ROW_NUMBER() OVER (ORDER BY nvtx_path)::BIGINT AS path_id
