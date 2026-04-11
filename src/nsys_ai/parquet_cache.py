@@ -446,9 +446,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             "version": _CACHE_VERSION,
             "source": os.path.basename(sqlite_path),
             "empty": len(src_tables) == 0 or not _find_table(src_tables, "StringIds"),
-            "nvtx_kernel_map_ready": bool(
-                (cache_dir / "nvtx_kernel_map.parquet").exists() or not defer_nvtx_map
-            ),
+            "nvtx_kernel_map_ready": (cache_dir / "nvtx_kernel_map.parquet").exists(),
             "deferred_nvtx_kernel_map": bool(defer_nvtx_map),
         }
         (cache_dir / ".cache_version").write_text(json.dumps(meta))

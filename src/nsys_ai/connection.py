@@ -28,8 +28,10 @@ def is_safe_identifier(name: str) -> bool:
 # ── Per-connection probe cache ───────────────────────────────────────────
 # - DuckDB: ``DuckDBPyConnection`` rejects arbitrary ``setattr`` but is
 #   weak-referenceable → ``WeakKeyDictionary`` drops entries when the DB closes.
-# - SQLite: ``sqlite3.Connection`` is *not* weak-referenceable → fall back to
-#   ``id(conn)`` map (small; typical CLI uses one short-lived connection).
+# - SQLite: ``sqlite3.Connection`` is *not* weak-referenceable.  We key the
+#   dict by the connection object itself (identity hash).  This keeps a strong
+#   reference for the process lifetime, which is fine for the short-lived CLI
+#   and avoids the ``id()``-reuse hazard (recycled IDs after GC give false hits).
 
 _PROBE_MISS = object()
 _duck_probe_bags: weakref.WeakKeyDictionary[Any, dict[str, Any]] = weakref.WeakKeyDictionary()
