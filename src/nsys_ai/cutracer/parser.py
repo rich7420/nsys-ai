@@ -150,14 +150,23 @@ def parse_histogram_dir(trace_dir: Path) -> dict[str, KernelHistogram]:
     result: dict[str, KernelHistogram] = {}
 
     hist_files = sorted(trace_dir.glob("**/*_hist.csv"))
-    ndjson_files = sorted(trace_dir.glob("**/*.ndjson"))
+    ndjson_files_recursive = sorted(trace_dir.glob("**/*.ndjson"))
+    ndjson_files = sorted(trace_dir.glob("*.ndjson"))
 
     if not hist_files and ndjson_files:
-        # Only raw ndjson traces found — resolve via SASS and build histograms.
+        # Only raw ndjson traces in the immediate directory — resolve via SASS.
         _log.debug("No *_hist.csv in %s; resolving %d ndjson file(s) via SASS",
                    trace_dir, len(ndjson_files))
         result = sass_resolve_dir(trace_dir)
         _log.debug("SASS-resolved %d kernel histogram(s)", len(result))
+        return result
+
+    if not hist_files and ndjson_files_recursive:
+        _log.debug(
+            "Found %d nested *.ndjson file(s) in %s, but SASS resolution only scans top-level files",
+            len(ndjson_files_recursive),
+            trace_dir,
+        )
         return result
 
     if not hist_files:

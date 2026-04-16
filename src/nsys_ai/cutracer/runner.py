@@ -429,6 +429,6 @@ def main() -> None:
     else:
         print(f"\\n==> {{downloaded}} CSV(s) downloaded to: {{local_dir}}")
         print(f"    Analyze with:")
-        print(f"      {analyze_cmd}")
+        print("      " + {analyze_cmd!r})
 '''
     return script

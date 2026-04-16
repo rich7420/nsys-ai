@@ -15,8 +15,12 @@ Workflow
 
 from __future__ import annotations
 
+import logging
 import shlex
 from dataclasses import dataclass, field
+
+_log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -104,7 +108,8 @@ def build_plan(
 
     try:
         rows = top_kernels_skill.execute_fn(conn, **kwargs)
-    except Exception:
+    except Exception as exc:
+        _log.warning("build_plan: top_kernels query failed: %s", exc)
         return CutracerPlan(profile_path=profile_path, device=device, trim=trim)
 
     if rows and "error" in rows[0]:

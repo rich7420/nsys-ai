@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 
+from nsys_ai.cutracer.installer import NVBIT_VERSION
+
 from .handlers import (
     _add_gpu_trim,
     _cmd_agent,
@@ -552,7 +554,7 @@ def _build_parser():
         dest="nvbit_version",
         default=None,
         metavar="VER",
-        help=f"NVBit release version to download (default: {__import__('nsys_ai.cutracer.installer', fromlist=['NVBIT_VERSION']).NVBIT_VERSION})",
+        help=f"NVBit release version to download (default: {NVBIT_VERSION})",
     )
     sp_install.add_argument(
         "--prereq-only",
