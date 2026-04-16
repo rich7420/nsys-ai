@@ -84,8 +84,7 @@ def _cutracer_analyze(args, _profile):
     trace_dir = Path(args.trace_dir)
     fmt = getattr(args, "format", "table")
     # cutracer_analysis skill expects trim in nanoseconds.
-    # build_plan expects (start_s, end_s) and performs ns conversion itself.
-    trim = tuple(args.trim) if getattr(args, "trim", None) else None
+    trim = _parse_trim(args)
 
     if not trace_dir.exists():
         print(f"Error: trace_dir not found: {trace_dir}", file=sys.stderr)
@@ -122,7 +121,8 @@ def _cutracer_run(args, _profile):
     launch_cmd = getattr(args, "launch_cmd", "") or ""
     top_n = getattr(args, "top_n", 5)
     device = getattr(args, "device", 0) or 0
-    trim = _parse_trim(args)
+    # build_plan expects (start_s, end_s) and performs ns conversion itself.
+    trim = tuple(args.trim) if getattr(args, "trim", None) else None
     dry_run = getattr(args, "dry_run", False)
     backend = getattr(args, "backend", "local")
     modal_save = getattr(args, "modal_save", None)

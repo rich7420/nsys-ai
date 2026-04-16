@@ -262,9 +262,15 @@ def format_plan_script(
 
     # ── Launch command ───────────────────────────────────────────────────────
     cmd = launch_cmd.strip() if launch_cmd.strip() else "python train.py"
+    escaped_cmd = (
+        cmd.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
     lines += [
         "# Your training / inference command",
-        f"LAUNCH_CMD={shlex.quote(cmd)}",
+        f'LAUNCH_CMD="{escaped_cmd}"',
         '# TODO: replace LAUNCH_CMD with your real command (supports quotes/spaces).',
         "",
     ]

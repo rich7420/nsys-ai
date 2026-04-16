@@ -125,7 +125,7 @@ def _execute(conn, **kwargs) -> list[dict]:
         nsys_name = ct_to_nsys.get(ct_name)
         nvtx_row = nvtx_map.get(nsys_name or ct_name, {})
         gpu_ms = gpu_time_map.get(nsys_name or ct_name)
-        pct = round(gpu_ms / (total_gpu or 1) * 100, 1) if gpu_ms else None
+        pct = round(gpu_ms / (total_gpu or 1) * 100, 1) if gpu_ms is not None else None
 
         kr = KernelReport(
             mix=mix,
