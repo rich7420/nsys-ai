@@ -171,7 +171,11 @@ def format_kernel_report(report: KernelReport) -> str:
     if report.nvtx_path:
         lines.append(f"  NVTX:   {report.nvtx_path}")
     if report.total_ms is not None:
-        pct_str = f"  ({report.pct_of_gpu:.1f}% of GPU time)" if report.pct_of_gpu else ""
+        pct_str = (
+            f"  ({report.pct_of_gpu:.1f}% of GPU time)"
+            if report.pct_of_gpu is not None
+            else ""
+        )
         lines.append(f"  nsys:   {report.total_ms:.2f} ms{pct_str}")
     if report.achieved_warps is not None:
         lines.append(f"  Warps:  {report.achieved_warps} distinct warp IDs observed")

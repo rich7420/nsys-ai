@@ -353,12 +353,16 @@ def run_with_cutracer(
         raise SystemExit(f"Training command exited with code {{result.returncode}}")
 
     # -----------------------------------------------------------------------
-    # Post-process: resolve opcode_id → SASS mnemonic, write _hist.csv files.
-    # sass_resolve_dir (from nsys_ai.cutracer.parser, installed above) handles
-    # the cutracer sass + SASS disassembly pipeline.  We just write CSVs from
-    # the returned KernelHistogram objects so they survive Volume download.
+    # Post-process fallback:
+    # - If cutracer already produced *_hist.csv, keep them as-is.
+    # - Otherwise, resolve ndjson/cubin via SASS and write histogram CSVs.
     # -----------------------------------------------------------------------
     out_dir = Path("/cutracer_out")
+    existing_hist = sorted(out_dir.glob("*_hist.csv"))
+    if existing_hist:
+        print(f"==> Found {{len(existing_hist)}} precomputed *_hist.csv file(s); skipping SASS post-process")
+        vol.commit()
+        return
 
     # Capture base_name → hash mapping from ndjson filenames before SASS resolution,
     # so we can reconstruct the kernel_<name>_<hash>_hist.csv naming expected by the parser.
@@ -381,7 +385,7 @@ def run_with_cutracer(
             writer = csv.writer(cf)
             writer.writerow(["warp_id", "region_id", "instruction", "count", "cycles"])
             for mn, cnt in sorted(hist.instruction_counts.items(), key=lambda x: -x[1]):
-                writer.writerow([0, 0, mn, cnt, 0])
+                writer.writerow([0, 0, mn, cnt, hist.instruction_cycles.get(mn, 0)])
         total = sum(hist.instruction_counts.values())
         print(f"==> Wrote {{csv_path.name}} ({{total:,}} instructions, {{len(hist.instruction_counts)}} opcodes)")
 

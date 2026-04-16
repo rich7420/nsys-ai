@@ -270,8 +270,10 @@ def sass_resolve_dir(trace_dir: Path) -> dict[str, KernelHistogram]:
             _log.warning("sass_resolve_dir: no SASS function matching '%s' in %s",
                          arch_suffix, cubin.name)
 
-        # Aggregate opcode counts across all iterations
+        # Aggregate opcode counts/cycles across all iterations.
         raw_counts: dict[int, int] = defaultdict(int)
+        raw_cycles: dict[int, int] = defaultdict(int)
+        warp_ids: set[int] = set()
         for ndf in ndjson_files:
             try:
                 with ndf.open() as fh:
@@ -285,7 +287,15 @@ def sass_resolve_dir(trace_dir: Path) -> dict[str, KernelHistogram]:
                             continue
                         oid = obj.get("opcode_id")
                         if oid is not None:
-                            raw_counts[int(oid)] += int(obj.get("count", 1))
+                            oid_i = int(oid)
+                            raw_counts[oid_i] += int(obj.get("count", 1))
+                            raw_cycles[oid_i] += int(obj.get("cycles", 0))
+                        wid = obj.get("warp_id", obj.get("warp"))
+                        if wid is not None:
+                            try:
+                                warp_ids.add(int(wid))
+                            except (TypeError, ValueError):
+                                pass
             except OSError as exc:
                 _log.warning("sass_resolve_dir: could not read %s: %s", ndf, exc)
 
@@ -295,14 +305,18 @@ def sass_resolve_dir(trace_dir: Path) -> dict[str, KernelHistogram]:
 
         # Map opcode_id → mnemonic
         mnemonic_counts: dict[str, int] = defaultdict(int)
+        mnemonic_cycles: dict[str, int] = defaultdict(int)
         for oid, cnt in raw_counts.items():
-            mnemonic_counts[tbl.get(oid, f"OPCODE_{oid}")] += cnt
+            mn = tbl.get(oid, f"OPCODE_{oid}")
+            mnemonic_counts[mn] += cnt
+            mnemonic_cycles[mn] += raw_cycles.get(oid, 0)
 
         kernel_name = arch_suffix or base_name
         result[kernel_name] = KernelHistogram(
             kernel_name=kernel_name,
             instruction_counts=dict(mnemonic_counts),
-            warp_count=0,
+            instruction_cycles=dict(mnemonic_cycles),
+            warp_count=len(warp_ids),
         )
 
     return result

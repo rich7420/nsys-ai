@@ -261,10 +261,11 @@ def format_plan_script(
         ]
 
     # ── Launch command ───────────────────────────────────────────────────────
-    cmd = launch_cmd.strip() if launch_cmd.strip() else "python train.py  # TODO: replace with your command"
+    cmd = launch_cmd.strip() if launch_cmd.strip() else "python train.py"
     lines += [
         "# Your training / inference command",
         f"LAUNCH_CMD={shlex.quote(cmd)}",
+        '# TODO: replace LAUNCH_CMD with your real command (supports quotes/spaces).',
         "",
     ]
 
@@ -302,7 +303,7 @@ def format_plan_script(
         'if [[ -n "$KERNEL_FILTER_CSV" ]]; then',
         '  CUTRACER_ARGS+=(--kernel-filters "$KERNEL_FILTER_CSV")',
         'fi',
-        'CUTRACER_ARGS+=(-- $LAUNCH_CMD)',
+        'CUTRACER_ARGS+=(-- bash -lc "$LAUNCH_CMD")',
         "",
         '"${CUTRACER_ARGS[@]}"',
         "",

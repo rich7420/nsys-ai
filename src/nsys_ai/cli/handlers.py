@@ -84,7 +84,8 @@ def _cutracer_analyze(args, _profile):
     trace_dir = Path(args.trace_dir)
     fmt = getattr(args, "format", "table")
     # cutracer_analysis skill expects trim in nanoseconds.
-    trim = _parse_trim(args)
+    # build_plan expects (start_s, end_s) and performs ns conversion itself.
+    trim = tuple(args.trim) if getattr(args, "trim", None) else None
 
     if not trace_dir.exists():
         print(f"Error: trace_dir not found: {trace_dir}", file=sys.stderr)
