@@ -152,7 +152,8 @@ def _cutracer_run(args, _profile):
     )
 
     if backend in {"modal", "modal-run"} or modal_save:
-        # Detect CUDA version from profile's GPU info for the image suggestion
+        # Detect CUDA version from the local CUDA toolkit for image suggestion.
+        # This does not read CUDA details from the Nsight profile itself.
         from nsys_ai.cutracer.installer import detect_cuda_version
         cuda_ver = detect_cuda_version()
         from nsys_ai.cutracer.runner import _cuda_image_for_version

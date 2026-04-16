@@ -182,17 +182,25 @@ def nvbit_download_url(nvbit_version: str = NVBIT_VERSION) -> str:
 
 
 def _safe_extract_tar(tf: tarfile.TarFile, dest_dir: Path) -> None:
-    """Extract tar members safely, rejecting path traversal and absolute paths."""
+    """Extract tar members safely.
+
+    Rejects path traversal, absolute paths, and link members
+    (symlink/hardlink) to avoid write-redirect tricks.
+    """
     root = dest_dir.resolve()
-    for member in tf.getmembers():
+    members = tf.getmembers()
+    for member in members:
+        if member.issym() or member.islnk():
+            raise RuntimeError(f"Unsupported link entry in tarball: {member.name!r}")
         member_path = root / member.name
         try:
             resolved = member_path.resolve()
         except OSError as exc:
             raise RuntimeError(f"Failed to resolve tar member path {member.name!r}: {exc}") from exc
-        if not str(resolved).startswith(str(root) + os.sep) and resolved != root:
+        if os.path.commonpath([str(root), str(resolved)]) != str(root):
             raise RuntimeError(f"Unsafe path in tarball: {member.name!r}")
-    tf.extractall(dest_dir)  # nosec B202
+    for member in members:
+        tf.extract(member, dest_dir)  # nosec B202
 
 
 def download_nvbit(
