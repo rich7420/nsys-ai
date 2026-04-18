@@ -109,10 +109,26 @@ Step 1  GPU peak TFLOPS is auto-detected by `region_mfu` from the profile.
 
 Step 2  Get a SINGLE representative step time (not the whole profile span):
         Option A — NVTX marker (preferred):
+          Prefer the CLI skill which handles schema differences automatically:
+            nsys-ai skill run iteration_timing <profile> --format json
+            → Skip index 0 (JIT); use median duration across iterations
+
+          If using raw SQL, check schema first: PRAGMA table_info(NVTX_EVENTS)
+
+          [NVTX_EVENTS has textId column]
           SELECT COALESCE(n.text, s.value) AS name, ([end]-start)/1e6 AS ms
           FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
-          WHERE name LIKE '%sample%' OR name LIKE '%step%' OR name LIKE '%iter%'
+          WHERE COALESCE(n.text, s.value) LIKE '%sample%'
+             OR COALESCE(n.text, s.value) LIKE '%step%'
+             OR COALESCE(n.text, s.value) LIKE '%iter%'
           ORDER BY start LIMIT 10
+
+          [NVTX_EVENTS has only text column]
+          SELECT text AS name, ([end]-start)/1e6 AS ms
+          FROM NVTX_EVENTS
+          WHERE text LIKE '%sample%' OR text LIKE '%step%' OR text LIKE '%iter%'
+          ORDER BY start LIMIT 10
+
           → Skip index 0 (JIT); use median duration across iterations
 
         Option B — No NVTX (rough upper bound):
