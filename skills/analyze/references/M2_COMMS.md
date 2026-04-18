@@ -37,7 +37,7 @@ Skip Stage 2 if user provided a keyword that maps to a sub-focus
 | `overlap` (default) | `overlap_breakdown` → `kernel_overlap_matrix` |
 | `outlier` | `nccl_anomaly -p threshold=3.0` → `nccl_breakdown` |
 | `topology` | `nccl_communicator_analysis` → `nccl_breakdown` (requires profile exported with `nsys export --include-blobs=true`; returns diagnostic if blobs missing) |
-| `per-rank-variance` | `nccl_breakdown -p device=N` once per device, compare `total_ms` across devices → `nccl_anomaly -p threshold=3.0` |
+| `per-rank-variance` | `nccl_breakdown -p device=N` once per device, sum `total_ms` across all rows for each device, compare per-device aggregates → `nccl_anomaly -p threshold=3.0` |
 
 Device propagation: if Mode 1 auto-retry selected device N, pass `-p device=N` to
 `overlap_breakdown`, `kernel_overlap_matrix`, `nccl_breakdown`, and
@@ -63,9 +63,9 @@ Device propagation: if Mode 1 auto-retry selected device N, pass `-p device=N` t
 | `overlap_pct` 30–60 | Partial pipelining | warning; tune prefetch |
 | `overlap_pct > 60` | NCCL well-hidden | info; not the bottleneck |
 | `nccl_anomaly.ratio_to_avg > 3` | Straggler NCCL op or rank | check NIC / dataset imbalance |
-| One device `total_ms >> others` (from `nccl_breakdown -p device=N`) | Single straggler GPU | NCCL_DEBUG=INFO; check switch port |
-| All devices `total_ms` up uniformly (from `nccl_breakdown`) | Cross-node congestion | NCCL_SOCKET_IFNAME; check IB/RoCE |
-| `overlap_breakdown.idle_ms` up across devices, `nccl_breakdown.total_ms` flat | CPU launch overhead → Mode 6 | check kernel dispatch latency |
+| One device `sum(total_ms)` across `nccl_breakdown -p device=N` rows `>>` others | Single straggler GPU | NCCL_DEBUG=INFO; check switch port |
+| All devices `sum(total_ms)` across `nccl_breakdown -p device=N` rows up uniformly | Cross-node congestion | NCCL_SOCKET_IFNAME; check IB/RoCE |
+| `overlap_breakdown.idle_ms` up across devices, per-device `sum(nccl_breakdown.total_ms)` flat | CPU launch overhead → Mode 6 | check kernel dispatch latency |
 
 **Overlap thresholds are not hard boundaries** — FSDP/ZeRO-3 with prefetch typically
 reaches 50–70%; DDP without bucketing often stays below 20%.
