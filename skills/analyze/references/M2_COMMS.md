@@ -12,7 +12,8 @@ Check `nccl.collectives` from `profile_health_manifest`:
 ```
 if nccl.collectives == 0:
     "Mode 2 blocked. Why: single-GPU profile — no NCCL activity recorded.
-    Fix: run with multi-GPU workload. Alternative: Mode 1 or Mode 6 for single-GPU."
+    Fix: run with multi-GPU workload. Alternative: Mode 1 or Mode 6 for single-GPU.
+    Reply with: 'mode1', 'mode6', or 'stop'."
 ```
 
 ---
@@ -36,7 +37,7 @@ Skip Stage 2 if user provided a keyword that maps to a sub-focus
 | `overlap` (default) | `overlap_breakdown` → `kernel_overlap_matrix` |
 | `outlier` | `nccl_anomaly -p threshold=3.0` → `nccl_breakdown` |
 | `topology` | `nccl_communicator_analysis` → `nccl_breakdown` (requires profile exported with `nsys export --include-blobs=true`; returns diagnostic if blobs missing) |
-| `per-rank-variance` | `nccl_breakdown` (all devices) → `nccl_anomaly -p threshold=3.0` |
+| `per-rank-variance` | `nccl_breakdown -p device=N` once per device, compare `total_ms` across devices → `nccl_anomaly -p threshold=3.0` |
 
 Device propagation: if Mode 1 auto-retry selected device N, pass `-p device=N` to
 `overlap_breakdown`, `kernel_overlap_matrix`, `nccl_breakdown`, and

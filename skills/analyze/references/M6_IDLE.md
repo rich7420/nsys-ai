@@ -49,10 +49,10 @@ See PRINCIPLES.md §6.
 |-------------------|-----------|--------|
 | manifest `idle.idle_pct > 15` OR `pipeline_bubble_metrics.bubble_pct > 15` | GPU starved | check DataLoader / CPU dispatch |
 | `sync_cost_analysis.sync_density_pct > 20` | Excessive CPU→GPU syncs | remove `.item()` / `.cpu()` in loop |
-| `kernel_launch_overhead.overhead_us` dominated by one caller | High CPU dispatch latency | async launch; reduce Python overhead |
-| `cpu_gpu_pipeline.starvation_events > 0` | CPU can't feed GPU fast enough | `num_workers`, `pin_memory`, `prefetch_factor` |
-| `thread_utilization` GIL contention (non-empty result) | DataLoader threads blocking | `persistent_workers=True`, reduce workers |
-| `module_loading` stalls on step 0 | JIT compilation | pre-warm; skip step 0 in benchmarks |
+| `kernel_launch_overhead.overhead_us` concentrated in the top `kernel_name` | High CPU dispatch latency | async launch; reduce Python overhead |
+| any `cpu_gpu_pipeline` row has `starvation_events > 0` | CPU can't feed GPU fast enough | `num_workers`, `pin_memory`, `prefetch_factor` |
+| `thread_utilization` non-empty: one Python/DataLoader thread dominating CPU utilization | CPU thread saturation / imbalance | `persistent_workers=True`, tune/reduce workers |
+| significant `module_loading` `cuModuleLoad` / `CompilePTX` total time | Startup / JIT compilation overhead | pre-warm; confirm warmup-only via timeline before treating as step 0 |
 | `gc_impact` `cudaMalloc/Free` spikes | Python GC stalls GPU | `torch.cuda.empty_cache()` placement |
 | `pipeline_bubble_metrics.bubble_pct > 10` | PP micro-batch bubble | increase `num_micro_batches`; check schedule |
 | `stream_concurrency` low despite multi-stream | Kernel serialization | check stream assignment / dependencies |
@@ -85,7 +85,7 @@ Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summar
    - DataLoader starvation: `DataLoader(..., num_workers=8, pin_memory=True, prefetch_factor=4, persistent_workers=True)`
    - `.item()` sync loop: remove from inner loop; accumulate as tensor, call once outside
    - Launch overhead: batch small kernel launches; use CUDA graphs for repeated patterns
-   - GC stall: `torch.backends.cuda.matmul.allow_tf32 = True` + `gc.disable()` in training loop
+   - GC stall: reduce allocation churn; reuse tensors/buffers; avoid frequent allocate/free cycles; `gc.disable()` only with explicit memory-safety caveat
    - PP bubble: `num_micro_batches = pipeline_stages * 2` (1F1B schedule)
 
 3. **Expected gain** — from `speedup_estimator` if NVTX present; omit otherwise.
