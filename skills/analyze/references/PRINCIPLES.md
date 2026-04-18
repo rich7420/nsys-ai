@@ -61,7 +61,7 @@ use the §7 template but offer an alternative path (not a hard block).
 | 5 | Mode 7 tool chain incomplete | `cutracer/installer.py:70-117` (nvcc / g++ / make / git / libzstd-dev) | Show exact `apt-get install` from error; stop |
 | 6 | Mode 7 on host without GPU AND user declined Modal | `cutracer/runner.py` subprocess fails | Pre-check `nvidia-smi`; §4.3 row 2 first |
 | 7 | Mode 8 paths resolve to same inode | Not validated in `diff.py` | Plugin `os.stat().st_ino` compare; stop before `nsys-ai diff` |
-| 8 | Mode 9 empty `iteration_timing` | Skill returns `[]` when no NVTX step markers | Offer Mode 5 Path B (see §4.3 row 3) |
+| 8 | Mode 9 empty `iteration_timing` | Skill returns `[]` only after NVTX matching and kernel-gap heuristic fallback both fail, or required runtime tables are unavailable | Offer Mode 5 Path B (see §4.3 row 3) |
 
 ### §4.2 Auto-handled — plugin must NOT ask the user
 

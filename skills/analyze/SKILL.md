@@ -80,6 +80,10 @@ position).
 | 8 | compute | `hotspot\|\bgemm\b\|\bflash\b\|\battention\b\|tensor core\|\bmfu\b\|\bkernel\b\|tflops\|utilization` | 3 |
 | 9 | auto | `why\|slow\|bottleneck\|\?` OR empty | 1 |
 
+> **Note on pattern syntax**: backslashes in the Pattern column above are Markdown table
+> escapes only. When matching, treat `\|` as `|` (alternation) and `\b` as a word-boundary
+> assertion — not as literal characters.
+
 For priorities not yet implemented (marked "(coming Stage …)" in the menu above), fall
 through to Mode 1 with a one-line notice:
 

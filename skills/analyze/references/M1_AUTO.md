@@ -126,24 +126,17 @@ directly — no chain prompt until Stage B1 lands.
 Follow `PRINCIPLES.md` §5 (universal evidence + timeline step). Then the 3-part summary
 framed for Mode 1.
 
-### 6.1 Evidence CLI (inline here; other mode refs just point at PRINCIPLES.md §5)
+### 6.1 Evidence CLI
 
-```bash
-nsys-ai evidence build <profile> --format json -o /tmp/findings.json
-nsys-ai timeline-web <profile> --findings /tmp/findings.json
-```
+Follow `PRINCIPLES.md §5` for the canonical evidence/timeline sequence, including:
 
-Then print to user the URL that `timeline-web` emitted (look for `http://127.0.0.1:PORT`
-in its stdout; `src/nsys_ai/web.py:674` hard-codes `127.0.0.1`, not `localhost`):
+- the `nsys-ai evidence build` and `nsys-ai timeline-web` commands,
+- printing the exact URL emitted by `timeline-web` (typically `http://127.0.0.1:PORT`),
+- WSL2/browser behavior, and
+- fail-soft handling when findings are empty or evidence generation fails.
 
-> "Timeline ready at http://127.0.0.1:PORT — open in browser to see findings overlay."
-
-**WSL2**: browser does NOT auto-open. Always print the exact URL emitted by `timeline-web`
-(typically `http://127.0.0.1:PORT`) — do not substitute `localhost` (on some systems it
-resolves to IPv6 ::1 and won't reach the server).
-
-**Fail-soft**: if `evidence build` produces empty `{"findings": []}`, still run `timeline-web`.
-Never block delivery on evidence failure.
+Do not restate or modify that procedure here; treat `PRINCIPLES.md §5` as the single source
+of truth.
 
 ### 6.2 3-part summary (Mode 1 framing)
 

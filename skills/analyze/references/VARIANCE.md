@@ -9,6 +9,14 @@ or the user says "the profile looks choppy" / "some iterations spike".
 
 ```
 Step 1  Get per-iteration timing (requires NVTX iteration markers):
+        Prefer the CLI skill which handles schema differences automatically:
+          nsys-ai skill run iteration_timing <profile> --format json
+
+        If using raw SQL, first check which columns NVTX_EVENTS has:
+          PRAGMA table_info(NVTX_EVENTS)
+        Then pick the appropriate query:
+
+        [NVTX_EVENTS has textId column]
         SELECT COALESCE(n.text, s.value) AS name,
                ([end]-start)/1e6 AS duration_ms,
                start/1e9 AS start_s
@@ -18,14 +26,19 @@ Step 1  Get per-iteration timing (requires NVTX iteration markers):
            OR COALESCE(n.text, s.value) LIKE '%iter%'
         ORDER BY start LIMIT 50
 
+        [NVTX_EVENTS has only text column]
+        SELECT text AS name, ([end]-start)/1e6 AS duration_ms, start/1e9 AS start_s
+        FROM NVTX_EVENTS
+        WHERE text LIKE '%sample%' OR text LIKE '%step%' OR text LIKE '%iter%'
+        ORDER BY start LIMIT 50
+
         Compute statistics:
-        SELECT MIN(n.[end]-n.start)/1e6 AS min_ms,
-               MAX(n.[end]-n.start)/1e6 AS max_ms,
-               AVG(n.[end]-n.start)/1e6 AS avg_ms,
+        SELECT MIN([end]-start)/1e6 AS min_ms,
+               MAX([end]-start)/1e6 AS max_ms,
+               AVG([end]-start)/1e6 AS avg_ms,
                COUNT(*) AS n_iters
-        FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
-        WHERE COALESCE(n.text, s.value) LIKE '%sample%'
-           OR COALESCE(n.text, s.value) LIKE '%step%'
+        FROM NVTX_EVENTS
+        WHERE text LIKE '%sample%' OR text LIKE '%step%'
 
         [If max_ms < 1.5 × avg_ms] → variance is normal; no problem to investigate
 

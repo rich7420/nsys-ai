@@ -48,10 +48,22 @@ Step 1  GPU peak TFLOPS is auto-detected by `region_mfu` from the profile GPU na
         If GPU unknown → ask user for peak TFLOPS (BF16, dense, no sparsity) and pass via `-p peak_tflops=<value>`.
 
 Step 2  Discover the target name (mandatory — never guess):
-        [Check NVTX first]
+        Prefer the CLI helpers which handle schema differences automatically:
+          nsys-ai search --nvtx <keyword> <profile>
+          nsys-ai tree <profile>
+
+        If using raw SQL, first check which columns exist:
+          PRAGMA table_info(NVTX_EVENTS)
+        Then pick the appropriate query:
+
+        [NVTX_EVENTS has textId column]
         SELECT DISTINCT COALESCE(n.text, s.value) AS name
         FROM NVTX_EVENTS n LEFT JOIN StringIds s ON n.textId=s.id
         WHERE COALESCE(n.text, s.value) IS NOT NULL LIMIT 30
+
+        [NVTX_EVENTS has only text column (no textId)]
+        SELECT DISTINCT text AS name FROM NVTX_EVENTS
+        WHERE text IS NOT NULL LIMIT 30
 
         [If no NVTX or targeting a kernel directly]
         SELECT DISTINCT s.value FROM StringIds s
