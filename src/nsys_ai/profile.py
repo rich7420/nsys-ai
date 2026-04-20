@@ -467,7 +467,7 @@ class Profile:
         if trim:
             sql += " AND n.start >= ? AND n.[end] <= ?"
             params += list(trim)
-        sql += " GROUP BY text"
+        sql += " GROUP BY COALESCE(n.text, s.value)" if self._nvtx_has_text_id else " GROUP BY text"
         sql += " ORDER BY total_ns DESC"
         if limit is not None:
             sql += " LIMIT ?"

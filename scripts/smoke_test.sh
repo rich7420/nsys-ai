@@ -2,16 +2,19 @@
 # Smoke test for nsys-ai plugin — validates that every CLI command referenced
 # in skills/analyze/SKILL.md + M*.md still works with the installed nsys-ai version.
 #
-# Usage:  ./scripts/smoke_test.sh <profile.sqlite> [nvtx-profile.sqlite]
+# Usage:  ./scripts/smoke_test.sh <profile.sqlite> [nvtx-profile.sqlite] [before.sqlite] [after.sqlite]
 #   profile.sqlite      — any GPU profile (NCCL preferred for Mode 2 coverage)
-#   nvtx-profile.sqlite — profile with NVTX_EVENTS; enables Mode 5 skill checks
+#   nvtx-profile.sqlite — profile with NVTX_EVENTS; enables Mode 5/9 skill checks
 #                         (optional; NVTX skills SKIP when omitted)
+#   before.sqlite       — baseline profile for Mode 8 Diff (optional; falls back to profile × profile)
+#   after.sqlite        — candidate profile for Mode 8 Diff (optional; same fallback)
 # Exit 0 if all checks succeed, non-zero otherwise.
 #
 # Stage A:  Mode 1 end-to-end (manifest → evidence → timeline surface check)
 # Stage B1: Mode 2 + Mode 6 drill-down skills + field-shape validation
 # Stage B2: Mode 3, Mode 4, Mode 5 drill-down skills + field-shape validation
 # Stage C1: Mode 7 CUTracer plan + script generation
+# Stage C2: Mode 8 Diff + Mode 9 Variance/iteration skills
 
 set -euo pipefail
 
@@ -23,12 +26,22 @@ fi
 if [[ -n "${2:-}" ]]; then
   if [[ ! -f "$2" ]]; then
     echo "error: nvtx-profile.sqlite not found: $2" >&2
-    echo "usage: $0 <profile.sqlite> [nvtx-profile.sqlite]" >&2
+    echo "usage: $0 <profile.sqlite> [nvtx-profile.sqlite] [before.sqlite] [after.sqlite]" >&2
     exit 2
   fi
   NVTX_PROFILE="$2"
 else
   NVTX_PROFILE="$PROFILE"
+fi
+
+# Mode 8 Diff: use dedicated before/after pair when supplied; otherwise same-file fallback.
+DIFF_BEFORE="${3:-$PROFILE}"
+DIFF_AFTER="${4:-$PROFILE}"
+if [[ -n "${3:-}" && ! -f "$3" ]]; then
+  echo "error: before.sqlite not found: $3" >&2; exit 2
+fi
+if [[ -n "${4:-}" && ! -f "$4" ]]; then
+  echo "error: after.sqlite not found: $4" >&2; exit 2
 fi
 
 FAIL=0
@@ -433,6 +446,97 @@ check_regex "  cutracer plan: Kernel column present" "$CUPLAN_OUT" 'Kernel'
 run_capture "cutracer plan --script" "$CUPLAN_SCRIPT_OUT" \
   nsys-ai cutracer plan "$PROFILE" --script --launch-cmd 'echo test'
 check_regex "  cutracer plan script: cutracer ref" "$CUPLAN_SCRIPT_OUT" 'cutracer'
+
+# ── Mode 8: Diff ──────────────────────────────────────────────────────────────
+echo "== Mode 8 — Diff =="
+DIFF_OUT="$(mktemp)"
+
+# 8a. Global diff — check all M8_DIFF.md top-level JSON keys
+run_capture "diff global --format json" "$DIFF_OUT" \
+  nsys-ai diff "$DIFF_BEFORE" "$DIFF_AFTER" --format json
+check_json_key "  diff: top_regressions key"   "$DIFF_OUT" 'top_regressions'
+check_json_key "  diff: top_improvements key"  "$DIFF_OUT" 'top_improvements'
+check_json_key "  diff: nvtx_regressions key"  "$DIFF_OUT" 'nvtx_regressions'
+check_json_key "  diff: nvtx_improvements key" "$DIFF_OUT" 'nvtx_improvements'
+check_json_key "  diff: overlap key"           "$DIFF_OUT" 'overlap'
+check_json_key "  diff: warnings key"          "$DIFF_OUT" 'warnings'
+
+# 8b. Same-file path: regressions and improvements must both be empty (comparing a
+#     profile to itself should yield zero kernel changes — §C2 acceptance test 2 CLI side).
+#     The same-inode warning is surfaced by the AI skill layer, not the CLI.
+DIFF_SAME_OUT="$(mktemp)"
+run_capture "diff same-file --format json" "$DIFF_SAME_OUT" \
+  nsys-ai diff "$PROFILE" "$PROFILE" --format json
+printf "  %-55s " "diff same-file: zero regressions + improvements"
+SAME_CHANGES=$(python3 -c "
+import json; d=json.load(open('$DIFF_SAME_OUT'))
+print(len(d.get('top_regressions',[])) + len(d.get('top_improvements',[])))
+" 2>/dev/null || echo 1)
+if [[ "$SAME_CHANGES" -eq 0 ]]; then echo "OK"; else echo "FAIL (expected 0 changes, got $SAME_CHANGES)"; FAIL=$((FAIL+1)); fi
+rm -f "$DIFF_SAME_OUT"
+
+# 8c. diff --gpu 0 (GPU-scoped diff — M8_DIFF.md §3 command 2c)
+DIFF_GPU_OUT="$(mktemp)"
+run_capture "diff --gpu 0 --format json" "$DIFF_GPU_OUT" \
+  nsys-ai diff "$DIFF_BEFORE" "$DIFF_AFTER" --format json --gpu 0
+check_json_key "  diff --gpu 0: top_regressions key" "$DIFF_GPU_OUT" 'top_regressions'
+rm -f "$DIFF_GPU_OUT"
+
+# 8d. diff --iteration 1 (iteration-scoped — M8_DIFF.md §3 command 2b)
+DIFF_ITER_OUT="$(mktemp)"
+run_capture "diff --iteration 1 --format json" "$DIFF_ITER_OUT" \
+  nsys-ai diff "$DIFF_BEFORE" "$DIFF_AFTER" --format json --iteration 1
+check_json_key "  diff --iteration 1: top_regressions key" "$DIFF_ITER_OUT" 'top_regressions'
+rm -f "$DIFF_ITER_OUT"
+
+# 8e. search --type nvtx (M8_DIFF.md §3 command 3 — discover NVTX names before drilling)
+SEARCH_OUT="$(mktemp)"
+if [[ "$NVTX_PROFILE" != "$PROFILE" ]] || nsys-ai search "$NVTX_PROFILE" --query '' --type nvtx --limit 1 >/dev/null 2>&1; then
+  run_capture "search --type nvtx --query '' --limit 5" "$SEARCH_OUT" \
+    nsys-ai search "$NVTX_PROFILE" --query '' --type nvtx --limit 5
+  printf "  %-55s " "search nvtx: non-empty output"
+  if [[ -s "$SEARCH_OUT" ]]; then echo "OK"; else echo "SKIP (no NVTX events)"; fi
+fi
+rm -f "$SEARCH_OUT"
+rm -f "$DIFF_OUT"
+
+# ── Mode 9: Variance ──────────────────────────────────────────────────────────
+echo "== Mode 9 — Variance =="
+
+# 9a. iteration_timing (precondition gate — M9_DIFF.md §1)
+ITER_TIMING_OUT="$(mktemp)"
+run_capture "skill iteration_timing --format json" "$ITER_TIMING_OUT" \
+  nsys-ai skill run iteration_timing "$NVTX_PROFILE" --format json
+printf "  %-55s " "iteration_timing: returns list"
+ITER_TYPE=$(python3 -c "import json,sys; d=json.load(open('$ITER_TIMING_OUT')); print('list' if isinstance(d,list) else 'other')" 2>/dev/null || echo other)
+if [[ "$ITER_TYPE" == "list" ]]; then echo "OK"; else echo "FAIL (expected list)"; FAIL=$((FAIL+1)); fi
+
+# 9b. iteration_detail on iteration 1 (skip index 0 per M9_VARIANCE.md §4)
+ITER_DETAIL_OUT="$(mktemp)"
+ITER_COUNT=$(python3 -c "import json; rows=json.load(open('$ITER_TIMING_OUT')); print(len(rows))" 2>/dev/null || echo 0)
+if [[ "$ITER_COUNT" -ge 2 ]]; then
+  run_capture "skill iteration_detail -p iteration=1 --format json" "$ITER_DETAIL_OUT" \
+    nsys-ai skill run iteration_detail "$NVTX_PROFILE" --format json -p iteration=1
+  printf "  %-55s " "iteration_detail: has duration_ms field"
+  DET_FIELDS=$(python3 -c "
+import json; d=json.load(open('$ITER_DETAIL_OUT'))
+rows = d if isinstance(d,list) else [d]
+print('ok' if rows and 'duration_ms' in rows[0] else 'missing')
+" 2>/dev/null || echo missing)
+  if [[ "$DET_FIELDS" == "ok" ]]; then echo "OK"; else echo "FAIL"; FAIL=$((FAIL+1)); fi
+else
+  printf "  %-55s SKIP (< 2 iterations detected)\n" "skill iteration_detail"
+fi
+rm -f "$ITER_DETAIL_OUT"
+
+# 9c. nccl_anomaly (Mode 9 NCCL straggler check — M9_VARIANCE.md §3 command 6)
+NCCL_ANOM_OUT="$(mktemp)"
+run_capture "skill nccl_anomaly --format json" "$NCCL_ANOM_OUT" \
+  nsys-ai skill run nccl_anomaly "$NVTX_PROFILE" --format json
+printf "  %-55s " "nccl_anomaly: returns list"
+NCCL_TYPE=$(python3 -c "import json; d=json.load(open('$NCCL_ANOM_OUT')); print('list' if isinstance(d,list) else 'other')" 2>/dev/null || echo other)
+if [[ "$NCCL_TYPE" == "list" ]]; then echo "OK"; else echo "FAIL"; FAIL=$((FAIL+1)); fi
+rm -f "$NCCL_ANOM_OUT" "$ITER_TIMING_OUT"
 
 # ── Plugin skill name check ───────────────────────────────────────────────────
 echo "== Plugin skill name (/nsys-ai) =="
