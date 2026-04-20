@@ -483,19 +483,35 @@ check_json_key "  diff --gpu 0: top_regressions key" "$DIFF_GPU_OUT" 'top_regres
 rm -f "$DIFF_GPU_OUT"
 
 # 8d. diff --iteration 1 (iteration-scoped — M8_DIFF.md §3 command 2b)
+#     Only run when both profiles have ≥ 2 iterations; otherwise the command
+#     exits without JSON and check_json_key would false-fail.
 DIFF_ITER_OUT="$(mktemp)"
-run_capture "diff --iteration 1 --format json" "$DIFF_ITER_OUT" \
-  nsys-ai diff "$DIFF_BEFORE" "$DIFF_AFTER" --format json --iteration 1
-check_json_key "  diff --iteration 1: top_regressions key" "$DIFF_ITER_OUT" 'top_regressions'
+BEFORE_ITERS=$(nsys-ai skill run iteration_timing "$DIFF_BEFORE" --format json 2>/dev/null \
+  | python3 -c "import json,sys; rows=json.load(sys.stdin); print(len(rows))" 2>/dev/null || echo 0)
+AFTER_ITERS=$(nsys-ai skill run iteration_timing "$DIFF_AFTER" --format json 2>/dev/null \
+  | python3 -c "import json,sys; rows=json.load(sys.stdin); print(len(rows))" 2>/dev/null || echo 0)
+printf "  %-55s " "diff --iteration 1 --format json"
+if [[ "$BEFORE_ITERS" -ge 2 && "$AFTER_ITERS" -ge 2 ]]; then
+  run_capture "diff --iteration 1 --format json" "$DIFF_ITER_OUT" \
+    nsys-ai diff "$DIFF_BEFORE" "$DIFF_AFTER" --format json --iteration 1
+  check_json_key "  diff --iteration 1: top_regressions key" "$DIFF_ITER_OUT" 'top_regressions'
+else
+  echo "SKIP (iterations unavailable: before=$BEFORE_ITERS after=$AFTER_ITERS)"
+fi
 rm -f "$DIFF_ITER_OUT"
 
 # 8e. search --type nvtx (M8_DIFF.md §3 command 3 — discover NVTX names before drilling)
+#     Gate on HAS_NVTX: "No results found." is non-empty so -s alone is not sufficient.
 SEARCH_OUT="$(mktemp)"
-if [[ "$NVTX_PROFILE" != "$PROFILE" ]] || nsys-ai search "$NVTX_PROFILE" --query '' --type nvtx --limit 1 >/dev/null 2>&1; then
-  run_capture "search --type nvtx --query '' --limit 5" "$SEARCH_OUT" \
-    nsys-ai search "$NVTX_PROFILE" --query '' --type nvtx --limit 5
-  printf "  %-55s " "search nvtx: non-empty output"
-  if [[ -s "$SEARCH_OUT" ]]; then echo "OK"; else echo "SKIP (no NVTX events)"; fi
+printf "  %-55s " "search --type nvtx --query '' --limit 5"
+if [[ "${HAS_NVTX:-0}" == "1" ]]; then
+  if nsys-ai search "$NVTX_PROFILE" --query '' --type nvtx --limit 5 >"$SEARCH_OUT" 2>/dev/null; then
+    echo "OK"
+  else
+    echo "FAIL"; FAIL=$((FAIL+1))
+  fi
+else
+  echo "SKIP (no NVTX events in profile)"
 fi
 rm -f "$SEARCH_OUT"
 rm -f "$DIFF_OUT"

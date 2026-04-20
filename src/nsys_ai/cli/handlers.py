@@ -635,7 +635,8 @@ def _cmd_iters(args, _profile):
     from nsys_ai.overlap import detect_iterations, format_iterations
 
     with _profile.open(args.profile) as prof:
-        print(format_iterations(detect_iterations(prof, args.gpu, _parse_trim(args))))
+        device = args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
+        print(format_iterations(detect_iterations(prof, device, _parse_trim(args))))
 
 
 def _cmd_tree(args, _profile):
