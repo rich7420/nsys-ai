@@ -33,7 +33,8 @@ Three checks; any failure → §7 template and abort:
 
 | iters result | Action |
 |-------------|--------|
-| ≥ 3 on both | Use `--iteration 1` (skip JIT iteration 0) |
+| ≥ 3 on both AND median `duration_ms > 10` | Use `--iteration 1` (skip JIT iteration 0) |
+| ≥ 3 on both but median `duration_ms ≤ 10` | Global diff; note iterations are heuristic noise |
 | 2 on either | Use `--iteration 1`; note single-iteration caveat |
 | 1 on either | Global diff (no `--iteration`); note profile too short |
 | Counts differ | Global diff; surface "iteration count mismatch" warning first |
