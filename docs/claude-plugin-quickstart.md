@@ -45,12 +45,12 @@ ask a question — keywords auto-route to the right mode.
 
 ```
 # Auto-triage: "why is this slow?"
-/nsys-ai report.nsys-rep
+/nsys-ai report1.nsys-rep
 
 # Skip menu with a direct question
-/nsys-ai report.nsys-rep why is my training slow?
-/nsys-ai report.nsys-rep nccl overlap
-/nsys-ai report.nsys-rep gemm kernel hotspot
+/nsys-ai report1.nsys-rep why is my training slow?
+/nsys-ai report1.nsys-rep nccl overlap
+/nsys-ai report1.nsys-rep gemm kernel hotspot
 
 # Compare two runs (Mode 8 — Diff)
 /nsys-ai before.sqlite after.sqlite
