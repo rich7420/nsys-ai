@@ -7,5 +7,9 @@
   },
   "repository": "https://github.com/GindaChen/nsys-ai",
   "license": "MIT",
-  "keywords": ["gpu", "nvidia", "nsight", "profiling", "cuda", "nccl", "mfu", "performance", "cutracer"]
+  "keywords": ["gpu", "nvidia", "nsight", "profiling", "cuda", "nccl", "mfu", "performance", "cutracer"],
+  "categories": ["development", "performance", "machine-learning"],
+  "requirements": {
+    "nsys-ai": ">=0.2.1"
+  }
 }
