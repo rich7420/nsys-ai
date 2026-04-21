@@ -558,7 +558,9 @@ echo "== Mode 9 — Variance =="
 #     accept list OR NVTX-missing error as correct behavior; FAIL only on
 #     unexpected shapes.
 ITER_TIMING_OUT="$(mktemp)"
-nsys-ai skill run iteration_timing "$NVTX_PROFILE" --format json >"$ITER_TIMING_OUT" 2>&1 || true
+# Discard stderr so nsys-ai's cache-build banner lines don't corrupt the JSON
+# parser (they are printed to stderr but a merged `2>&1` would break json.load).
+nsys-ai skill run iteration_timing "$NVTX_PROFILE" --format json >"$ITER_TIMING_OUT" 2>/dev/null || true
 printf "  %-55s " "skill iteration_timing --format json"
 ITER_SHAPE=$(python3 -c "
 import json
@@ -612,7 +614,9 @@ rm -f "$ITER_DETAIL_OUT"
 # 9c. nccl_anomaly (Mode 9 NCCL straggler check — M9_VARIANCE.md §3 command 6).
 #     Accepts empty list (no NCCL) as correct behavior on minimal profiles.
 NCCL_ANOM_OUT="$(mktemp)"
-nsys-ai skill run nccl_anomaly "$NVTX_PROFILE" --format json >"$NCCL_ANOM_OUT" 2>&1 || true
+# Same rationale as Mode 9a: discard stderr so cache-build banners don't
+# corrupt the JSON parser.
+nsys-ai skill run nccl_anomaly "$NVTX_PROFILE" --format json >"$NCCL_ANOM_OUT" 2>/dev/null || true
 printf "  %-55s " "skill nccl_anomaly --format json"
 NCCL_SHAPE=$(python3 -c "
 import json

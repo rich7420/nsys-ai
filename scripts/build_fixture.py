@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Regenerate tests/fixtures/mock.sqlite (the hermetic CI fixture).
 
-Requires a CUDA-capable host with `nsys` on PATH. Produces a minimal profile
-(1 tiny kernel, no NCCL, no NVTX) — just enough to exercise nsys-ai CLI
-wiring in CI without depending on user-local ~100 MB profiles.
+Requirements (for a real build, not --dry-run):
+  - `nsys` binary on PATH (NVIDIA Nsight Systems)
+  - CUDA-capable GPU accessible (`nvidia-smi` works)
+  - PyTorch with CUDA support installed in the **same interpreter** this script
+    runs with — the inner capture is `python -c "import torch; torch.zeros(16, device='cuda') ..."`.
+    On a multi-venv system run via the CUDA venv, e.g. `.venv-gpu/bin/python scripts/build_fixture.py`.
+
+Produces a minimal profile (1 tiny kernel, no NCCL, no NVTX) — just enough to
+exercise nsys-ai CLI wiring in CI without depending on user-local ~100 MB profiles.
 
 CI (`.github/workflows/plugin-smoke.yml`) loads the committed fixture; this
 script is run manually on a CUDA host when the nsys schema changes.
 
 Usage:
-    python scripts/build_fixture.py              # actually build
-    python scripts/build_fixture.py --dry-run    # print commands only
+    python scripts/build_fixture.py              # actually build (needs GPU + torch)
+    python scripts/build_fixture.py --dry-run    # print commands only (no CUDA needed)
 """
 import argparse
 import shlex
@@ -45,6 +51,30 @@ def build_commands() -> list[list[str]]:
     ]
 
 
+def preflight() -> None:
+    """Fail fast with a clear message if prerequisites are missing.
+
+    Only runs in real-build mode. --dry-run skips preflight so CI can
+    syntax-check the script on hosts without CUDA or torch.
+    """
+    import shutil
+    if shutil.which("nsys") is None:
+        sys.exit("error: `nsys` not on PATH — install NVIDIA Nsight Systems "
+                 "(https://developer.nvidia.com/nsight-systems) and retry.")
+    try:
+        import torch  # noqa: F401 — probe only
+    except ImportError:
+        sys.exit("error: torch not installed in this interpreter "
+                 f"({sys.executable}). The inner capture runs `import torch`. "
+                 "Install torch with CUDA support (e.g. `pip install torch`) "
+                 "or invoke this script via a CUDA-enabled venv, "
+                 "e.g. `.venv-gpu/bin/python scripts/build_fixture.py`.")
+    if not torch.cuda.is_available():
+        sys.exit("error: torch installed but CUDA not available. Ensure the "
+                 "interpreter was built with CUDA and a GPU is visible "
+                 "(check `nvidia-smi`).")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true",
@@ -59,6 +89,8 @@ def main() -> int:
         for cmd in cmds:
             print(shlex.join(cmd))
         return 0
+
+    preflight()
 
     for cmd in cmds:
         print(f"$ {shlex.join(cmd)}")
