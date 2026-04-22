@@ -265,6 +265,65 @@ class TestHostSyncParentRanges:
         # No error row; just runs normally (empty since no syncs).
         assert out == []
 
+    def test_case_insensitive_pattern_matching(self):
+        # User supplies uppercase/mixed-case pattern; should still match
+        # lowercase labels in the profile (and vice versa). DuckDB's LIKE is
+        # case-sensitive by default, so this test guards the engine parity.
+        conn = _build_conn(
+            [
+                ("train_step",   0, 10_000_000),
+                ("aten::ITEM_UPPERCASE", 1_000_000, 1_500_000),
+            ]
+        )
+        out = skill_mod._execute(conn, patterns="item")  # lowercase pattern
+        assert len(out) == 1
+        assert out[0]["parent_range"] == "train_step"
+        # And vice versa — uppercase pattern matches lowercase label.
+        conn2 = _build_conn(
+            [
+                ("train_step",  0, 10_000_000),
+                ("aten::item",  1_000_000, 1_500_000),
+            ]
+        )
+        out2 = skill_mod._execute(conn2, patterns="ITEM")
+        assert len(out2) == 1
+        assert out2[0]["parent_range"] == "train_step"
+
+    def test_non_range_event_types_excluded(self):
+        # Marker-type NVTX events (eventType not in (59, 60)) must not be
+        # treated as ranges — they have zero duration semantics and would
+        # pollute the ancestry join.
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            """
+            CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE NVTX_EVENTS (
+                globalTid INTEGER DEFAULT 0,
+                start     INTEGER NOT NULL,
+                end       INTEGER NOT NULL,
+                text      TEXT,
+                textId    INTEGER,
+                eventType INTEGER DEFAULT 59
+            );
+            """
+        )
+        # A marker (eventType=75, some non-range code) containing an item
+        # call — must be skipped, leaving `train_step` (eventType=59) as
+        # the sole parent.
+        conn.executescript(
+            """
+            INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType) VALUES
+                (1,        0, 10000000, 'train_step',         59),
+                (1,        0, 10000000, 'fake_marker_range',  75),
+                (1, 1000000,  1500000,  'aten::item',         59);
+            """
+        )
+        conn.commit()
+        out = skill_mod._execute(conn)
+        parents = {r["parent_range"] for r in out}
+        assert "train_step" in parents
+        assert "fake_marker_range" not in parents
+
     def test_registered_in_builtin_registry(self):
         from nsys_ai.skills import registry
 

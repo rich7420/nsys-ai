@@ -55,18 +55,28 @@ def _execute(conn, **kwargs):
         trim_where = "AND n.start >= ? AND n.[end] <= ?"
         trim_params = [int(trim_start), int(trim_end)]
 
-    # Bound the LIKE patterns — user-supplied input flows through `patterns` param.
+    # Bound the LIKE patterns — user-supplied input flows through `patterns`
+    # param. Lower-case both sides so matching is consistent across DuckDB
+    # (case-sensitive LIKE) and SQLite (case-insensitive LIKE by default).
     like_parts = []
     like_params: list[str] = []
     for p in patterns:
-        like_parts.append("child.label LIKE ?")
-        like_params.append(f"%{p}%")
+        like_parts.append("LOWER(label) LIKE ?")
+        like_params.append(f"%{p.lower()}%")
     like_clause = " OR ".join(like_parts)
 
     # Self-exclusion predicate: parent must cover child strictly (either a
     # different start or a different end). This keeps same-labeled but
     # distinct ancestors — e.g. nested `train_step` scopes — while still
     # preventing a range from matching itself.
+    #
+    # Event-type filter: 59 = PushPop range, 60 = StartEnd range; markers
+    # and counter/payload events are excluded so they don't inflate the
+    # ancestry join or misattribute sync time.
+    #
+    # Performance: we pre-filter sync children into their own CTE so the
+    # ancestry join runs over only the rows that match the sync patterns,
+    # instead of the full NVTX set.
     sql = f"""
         WITH resolved AS (
             SELECT {label_expr} AS label,
@@ -75,19 +85,26 @@ def _execute(conn, **kwargs):
                    n.[end]       AS end_ns
             FROM {nvtx_table} n
             {label_join}
-            WHERE n.[end] > n.start {trim_where}
+            WHERE n.[end] > n.start
+              AND n.eventType IN (59, 60)
+              {trim_where}
+        ),
+        sync_children AS (
+            SELECT label, tid, start, end_ns
+            FROM resolved
+            WHERE ({like_clause}) AND label IS NOT NULL
         ),
         matched AS (
             SELECT parent.label                 AS parent_range,
                    child.label                  AS child_label,
                    child.end_ns - child.start   AS sync_ns
-            FROM resolved child
+            FROM sync_children child
             JOIN resolved parent
               ON parent.tid = child.tid
              AND parent.start <= child.start
              AND parent.end_ns >= child.end_ns
              AND (parent.start != child.start OR parent.end_ns != child.end_ns)
-            WHERE ({like_clause}) AND parent.label IS NOT NULL
+            WHERE parent.label IS NOT NULL
         ),
         parent_totals AS (
             SELECT parent_range,
