@@ -191,6 +191,25 @@ def test_sync_analysis_invalid_device_param(sync_skill):
     assert "device" in rows[0]["error"].lower()
 
 
+def test_sync_analysis_cache_key_normalizes_device_type(sync_skill):
+    """Regression: `device=1` and `device='1'` must share a cache entry.
+    _impl coerces both to int, so if the wrapper keyed the cache on the raw
+    kwarg, the string call would miss and re-run the query — defeating the
+    cross-skill cache reuse."""
+    conn = sqlite3.connect(":memory:")
+    _seed_multi_device(conn)
+
+    sync_skill.execute(conn, device=1)
+    size_after_int = len(_sync_result_cache)
+    sync_skill.execute(conn, device="1")
+    size_after_str = len(_sync_result_cache)
+
+    assert size_after_str == size_after_int, (
+        "device=1 and device='1' must share the cache entry "
+        f"(size grew {size_after_int} → {size_after_str})"
+    )
+
+
 def test_sync_analysis_device_filter_on_missing_tables_reports_not_found(sync_skill):
     """Regression: if sync tables are absent entirely, supplying `device=N`
     must still report 'Synchronization tables not found', not 'no deviceId column'.

@@ -28,10 +28,18 @@ def skill_text() -> str:
 
 @pytest.fixture(scope="module")
 def frontmatter(skill_text: str) -> dict[str, str]:
-    # Frontmatter is between the first two '---' lines.
-    parts = skill_text.split("---", 2)
-    assert len(parts) >= 3, "SKILL.md must start with YAML frontmatter delimited by ---"
-    raw = parts[1]
+    # Frontmatter must START the document (not just appear somewhere) and be
+    # delimited by standalone `---` lines — otherwise a later horizontal rule
+    # would be misparsed as a closing delimiter.
+    stripped = skill_text.lstrip("﻿\r\n\t ")
+    assert stripped.startswith("---\n") or stripped.startswith("---\r\n"), (
+        "SKILL.md must start with YAML frontmatter delimited by ---"
+    )
+    delimiters = list(re.finditer(r"(?m)^---[ \t]*$", skill_text))
+    assert len(delimiters) >= 2, (
+        "SKILL.md must contain YAML frontmatter delimited by standalone --- lines"
+    )
+    raw = skill_text[delimiters[0].end():delimiters[1].start()]
     # Stdlib parse: treat every "key: value" line as a mapping entry. Good enough for
     # our flat frontmatter; multi-line scalars collapse into one string.
     fm: dict[str, str] = {}
@@ -123,16 +131,31 @@ def test_wizard_handles_zero_one_many_profiles(skill_text: str) -> None:
 
 def test_q2_focus_has_exactly_four_options(skill_text: str) -> None:
     body = _section(skill_text, "Mode Menu (interactive wizard)")
-    # Q2 spec block: look for the numbered list of labels.
-    # Pin the four expected labels directly.
     expected_labels = [
         "Auto triage (Recommended)",
         "Compute",
         "Comms",
         "Idle",
     ]
-    for label in expected_labels:
-        assert f'"{label}"' in body, f"Q2 option label missing: {label!r}"
+
+    # Extract only the Q2 block and parse its numbered options so a 5th option
+    # (or a renamed/missing one) fails the test — "exactly 4" must be enforced,
+    # not just "these 4 are present somewhere".
+    q2_match = re.search(
+        r"Q2 — Focus(?P<q2_body>.*?)(?:^\*\*Q\d+\s+—|^###|\Z)",
+        body,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert q2_match, "Q2 block not found"
+    q2_body = q2_match.group("q2_body")
+
+    q2_labels = re.findall(r'^\s*\d+\.\s*label\s*`"([^"]+)"`', q2_body, flags=re.MULTILINE)
+    assert len(q2_labels) == 4, (
+        f"Q2 must define exactly 4 options, found {len(q2_labels)}: {q2_labels!r}"
+    )
+    assert set(q2_labels) == set(expected_labels), (
+        f"Q2 options must match expected labels exactly; found {q2_labels!r}"
+    )
 
 
 def test_q2_recommended_option_is_first(skill_text: str) -> None:
@@ -166,6 +189,25 @@ def test_no_manual_other_option(skill_text: str) -> None:
         r"(do NOT add `Other` manually|Auto `Other`|auto `Other`|auto-`Other`)",
         body,
     ), "wizard must document that 'Other' is auto-added (not listed manually)"
+
+    # Enforce the actual contract: no enumerated AskUserQuestion option in the
+    # Q1/Q2 blocks may manually list "Other" as a label. Documentation alone
+    # is not enough — a regression that adds `5. label "Other" …` would slip
+    # past the assertion above.
+    question_blocks = re.findall(
+        r"(?ms)(\*\*Q[12]\s+—.*?)(?=\*\*Q[12]\s+—|^###|\Z)",
+        body,
+    )
+    assert question_blocks, "Q1/Q2 blocks not found in wizard section"
+
+    numbered_option_re = re.compile(r"^\s*\d+\.\s*.*$", flags=re.MULTILINE)
+    manual_other_re = re.compile(r'(?i)label\s*`"Other"`|^\s*\d+\.\s*`"Other"`')
+
+    for block_text in question_blocks:
+        for option_line in numbered_option_re.findall(block_text):
+            assert not manual_other_re.search(option_line), (
+                f'"Other" must not be manually listed as an AskUserQuestion option: {option_line!r}'
+            )
 
 
 # ---------------------------------------------------------------------------

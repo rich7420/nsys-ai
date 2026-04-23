@@ -39,11 +39,20 @@ def _execute_sync_analysis(conn, **kwargs) -> list[dict]:
     # Module-level cache keyed by (connection identity, trim window, device).
     # Avoids redundant re-execution when called by multiple consumer skills
     # (manifest, root_cause, overlap, bubble) within the same profile session.
+    # Normalize `device` before caching so `device=1` and `device='1'` — which
+    # _impl coerces to the same int — share the cache entry. Invalid values
+    # pass through unchanged so _impl still emits its own error.
+    raw_device = kwargs.get("device")
+    if raw_device is not None:
+        try:
+            raw_device = int(raw_device)
+        except (TypeError, ValueError):
+            pass
     cache_key = (
         id(conn),
         kwargs.get("trim_start_ns"),
         kwargs.get("trim_end_ns"),
-        kwargs.get("device"),
+        raw_device,
     )
     cached = _sync_result_cache.get(cache_key)
     if cached is not None:
