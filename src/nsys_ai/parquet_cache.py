@@ -49,7 +49,7 @@ import duckdb
 log = logging.getLogger(__name__)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 11  # bumped: nvtx_kernel_map uses path_id surrogate + nvtx_path_dict.parquet
+_CACHE_VERSION = 12  # bumped: sync.parquet now includes deviceId for per-rank sync attribution
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -197,9 +197,9 @@ _TABLE_PROJECTIONS: dict[str, str] = {
     "CUPTI_ACTIVITY_KIND_RUNTIME": 'start, "end", correlationId, globalTid, nameId',
     "CUPTI_ACTIVITY_KIND_RUNTIME_V2": 'start, "end", correlationId, globalTid, nameId',
     "CUPTI_ACTIVITY_KIND_RUNTIME_V3": 'start, "end", correlationId, globalTid, nameId',
-    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION": 'start, "end", globalPid, syncType',
-    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION_V2": 'start, "end", globalPid, syncType',
-    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION_V3": 'start, "end", globalPid, syncType',
+    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION": 'start, "end", deviceId, globalPid, syncType',
+    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION_V2": 'start, "end", deviceId, globalPid, syncType',
+    "CUPTI_ACTIVITY_KIND_SYNCHRONIZATION_V3": 'start, "end", deviceId, globalPid, syncType',
     "ENUM_CUPTI_SYNC_TYPE": "id, name",
 }
 
@@ -420,6 +420,15 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             if actual:
                 _progress(f"{view_name}.parquet")
                 projection = _TABLE_PROJECTIONS.get(actual, "*")
+                # Legacy Nsight exports may lack `deviceId` on synchronization
+                # tables. Drop it from the projection rather than failing the
+                # cache build — sync_cost_analysis degrades to single-device mode.
+                if (
+                    projection != "*"
+                    and actual.startswith("CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
+                    and not _table_has_column(db, f"src.{actual}", "deviceId")
+                ):
+                    projection = projection.replace("deviceId, ", "")
                 if projection == "*":
                     db.execute(f"""
                         COPY src.{actual}
