@@ -205,15 +205,21 @@ def get_profile_id(
     # ``.encode("utf-8")``.
     fallback_str = os.fspath(fallback_path) if fallback_path is not None else None
 
+    def _path_id(p: str) -> str:
+        digest = hashlib.sha256(p.encode("utf-8")).hexdigest()
+        return f"{PROFILE_ID_VERSION}:path:{digest}"
+
+    def _null_id() -> str:
+        """The shared null-id sentinel — same value whether ``conn`` is
+        None or merely empty, so consumers can detect "no usable
+        identity" with a single equality check."""
+        return f"{PROFILE_ID_VERSION}:sha256:{hashlib.sha256(b'').hexdigest()}"
+
     # None-safe shortcut: wrap_connection(None) returns a SQLiteAdapter
     # over None, whose .execute() raises AttributeError (not a DB error),
     # so the loop's try/except wouldn't catch it. Skip the queries.
     if conn is None:
-        if fallback_str:
-            digest = hashlib.sha256(fallback_str.encode("utf-8")).hexdigest()
-            return f"{PROFILE_ID_VERSION}:path:{digest}"
-        empty = hashlib.sha256(b"").hexdigest()
-        return f"{PROFILE_ID_VERSION}:sha256:{empty}"
+        return _path_id(fallback_str) if fallback_str else _null_id()
 
     adapter = wrap_connection(conn)
 
@@ -283,9 +289,11 @@ def get_profile_id(
     def _empty(v: typing.Any) -> bool:
         return v is None or v == "" or v == [] or v == 0
 
-    if all(_empty(v) for _, v in parts) and fallback_str:
-        digest = hashlib.sha256(fallback_str.encode("utf-8")).hexdigest()
-        return f"{PROFILE_ID_VERSION}:path:{digest}"
+    if all(_empty(v) for _, v in parts):
+        # Same shape as the ``conn is None`` branch above: path-fallback
+        # if available, else the null-id sentinel. This keeps the
+        # "no usable identity" check a single equality.
+        return _path_id(fallback_str) if fallback_str else _null_id()
 
     # JSON canonical: structured, unambiguous, no separator collisions.
     # ``sort_keys=False`` because ``parts`` is already ordered; flipping

@@ -173,10 +173,18 @@ def test_get_profile_id_missing_tables_falls_back_to_path():
     assert _PATH_RE.match(pid), pid
 
 
-def test_get_profile_id_missing_tables_without_fallback_is_constant_hash():
-    """Empty conn + no fallback → constant nsys1:sha256 (degraded but valid)."""
+def test_get_profile_id_missing_tables_without_fallback_is_null_sentinel():
+    """Empty conn + no fallback → the *same* null-id sentinel as
+    ``get_profile_id(None)``. Consumers should be able to detect
+    "no usable identity" with a single equality check regardless of
+    whether the caller passed ``None`` or a real-but-empty conn."""
     pid = get_profile_id(sqlite3.connect(":memory:"))
-    assert _SHA256_RE.match(pid), pid
+    assert pid == get_profile_id(None), (
+        "conn=empty and conn=None must produce the same null-id sentinel"
+    )
+    # And they must both be the well-known empty-string SHA-256.
+    empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    assert pid == f"nsys1:sha256:{empty_sha}"
 
 
 def test_get_profile_id_partial_metadata_still_content_path():
