@@ -9,6 +9,7 @@ import json
 from nsys_ai.annotation import (
     Diagnostic,
     DiffLineage,
+    EvidenceReport,
     EvidenceRow,
     Finding,
     TraceSelection,
@@ -527,6 +528,8 @@ class TestModuleExports:
 
     def test_imports(self):
         from nsys_ai.annotation import (
+            PRODUCER,
+            SCHEMA_VERSION,
             Diagnostic,
             DiffLineage,
             EvidenceReport,
@@ -548,3 +551,288 @@ class TestModuleExports:
         assert TraceSelection is not None
         assert callable(load_findings)
         assert callable(save_findings)
+        assert isinstance(SCHEMA_VERSION, str) and SCHEMA_VERSION
+        assert PRODUCER == "nsys-ai"
+
+
+class TestFindingV01Fields:
+    """The additive v0.1 optional fields on Finding."""
+
+    def _legacy(self, **overrides) -> Finding:
+        kwargs = dict(type="region", label="L", start_ns=0)
+        kwargs.update(overrides)
+        return Finding(**kwargs)
+
+    def test_legacy_construction_still_works(self):
+        """No new field is required; pre-v0.1 callers see no behavior change."""
+        f = self._legacy()
+        assert f.id is None
+        assert f.category is None
+        assert f.confidence is None
+        assert f.evidence is None
+        assert f.selection is None
+        assert f.explanation is None
+        assert f.suggested_actions is None
+        assert f.false_positive_notes is None
+        assert f.provenance is None
+        assert f.diff_lineage is None
+
+    def test_legacy_to_dict_drops_all_new_fields(self):
+        """Default Finding produces the same dict shape as before v0.1."""
+        d = self._legacy().to_dict()
+        # New fields, all None by default, must not appear.
+        for k in (
+            "id",
+            "category",
+            "confidence",
+            "evidence",
+            "selection",
+            "explanation",
+            "suggested_actions",
+            "false_positive_notes",
+            "provenance",
+            "diff_lineage",
+        ):
+            assert k not in d, f"new field {k} leaked into legacy to_dict"
+
+    def test_scalar_new_fields_round_trip(self):
+        f = self._legacy(
+            id="f0",
+            category="idle",
+            confidence=0.83,
+            explanation="GPU stalls after backward pass.",
+            suggested_actions=["inspect DDP overlap"],
+            false_positive_notes=["short inference may be fine"],
+            provenance={"trim_start_ns": 0},
+        )
+        restored = Finding.from_dict(f.to_dict())
+        assert restored == f
+
+    def test_nested_evidence_round_trip(self):
+        rows = [
+            EvidenceRow(
+                id="r0",
+                source_skill="gpu_idle_gaps",
+                values={"gap_ms": 12.5},
+                units={"gap_ms": "ms"},
+            ),
+            EvidenceRow(id="r1", source_skill="overlap_breakdown"),
+        ]
+        f = self._legacy(id="f1", category="idle", evidence=rows)
+        restored = Finding.from_dict(f.to_dict())
+        assert restored.evidence == rows
+        # Nested type is rehydrated, not a list of dicts.
+        assert isinstance(restored.evidence[0], EvidenceRow)
+
+    def test_nested_selection_round_trip(self):
+        sel = TraceSelection(
+            id="sel_0",
+            profile_id="abc",
+            source="skill:gpu_idle_gaps",
+            start_ns=10,
+            end_ns=20,
+            gpu_ids=[0],
+        )
+        f = self._legacy(id="f2", selection=sel)
+        restored = Finding.from_dict(f.to_dict())
+        assert restored.selection == sel
+        assert isinstance(restored.selection, TraceSelection)
+
+    def test_nested_diff_lineage_round_trip(self):
+        lin = DiffLineage(
+            diff_id="diff_x",
+            role="regression",
+            rank=1,
+            baseline_profile_id="base_v1",
+        )
+        f = self._legacy(id="f3", diff_lineage=lin)
+        restored = Finding.from_dict(f.to_dict())
+        assert restored.diff_lineage == lin
+        assert isinstance(restored.diff_lineage, DiffLineage)
+
+    def test_full_v01_finding_json_round_trip(self):
+        rows = [EvidenceRow(id="r0", source_skill="overlap_breakdown")]
+        sel = TraceSelection(id="sel", profile_id="p", source="diff", start_ns=1)
+        lin = DiffLineage(diff_id="d", role="improvement", rank=0, baseline_profile_id="b")
+        f = self._legacy(
+            id="f",
+            category="communication",
+            confidence=0.9,
+            evidence=rows,
+            selection=sel,
+            explanation="exposed NCCL improved",
+            suggested_actions=["keep change"],
+            false_positive_notes=["small N"],
+            provenance={"trim_start_ns": 0},
+            diff_lineage=lin,
+        )
+        restored = Finding.from_dict(json.loads(json.dumps(f.to_dict())))
+        assert restored == f
+
+    def test_legacy_json_loads_with_defaults(self):
+        """A pre-v0.1 JSON payload (no new keys) loads cleanly."""
+        legacy = {
+            "type": "region",
+            "label": "L",
+            "start_ns": 100,
+            "end_ns": 200,
+            "severity": "warning",
+            "note": "old payload",
+        }
+        f = Finding.from_dict(legacy)
+        assert f.label == "L"
+        assert f.severity == "warning"
+        # New fields keep their None defaults.
+        assert f.id is None
+        assert f.category is None
+        assert f.evidence is None
+
+    def test_nested_to_dict_drops_inner_none(self):
+        """Nested EvidenceRow.to_dict drops None inside the Finding payload."""
+        rows = [EvidenceRow(id="r", source_skill="x")]  # selection_id is None
+        f = self._legacy(id="f", evidence=rows)
+        d = f.to_dict()
+        assert d["evidence"][0]["id"] == "r"
+        # selection_id was None on the row → must not leak into JSON output.
+        assert "selection_id" not in d["evidence"][0]
+
+    def test_to_dict_mutation_safety_for_mutable_fields(self):
+        """Mutating mutable containers in to_dict output must not mutate the source."""
+        f = self._legacy(
+            id="f",
+            provenance={"a": 1},
+            suggested_actions=["action_a"],
+            false_positive_notes=["note_a"],
+        )
+        d = f.to_dict()
+        d["provenance"]["a"] = 999
+        d["suggested_actions"].append("mutated")
+        d["false_positive_notes"].clear()
+        assert f.provenance == {"a": 1}
+        assert f.suggested_actions == ["action_a"]
+        assert f.false_positive_notes == ["note_a"]
+
+    def test_to_dict_avoids_wasted_nested_materialization(self, monkeypatch):
+        """Refactored to_dict reads nested fields once via their own to_dict.
+
+        Regression guard for the perf fix that replaced ``asdict(self)`` with
+        a hand-rolled ``fields()`` walk: confirms each nested type's
+        ``to_dict`` is invoked exactly once for a Finding with one of each
+        nested kind populated.
+
+        Implemented with ``monkeypatch`` + manual call counters rather than
+        ``unittest.mock.patch.object(autospec=True, wraps=...)`` because the
+        ``autospec + wraps`` combination behaves inconsistently across
+        Python 3.10 / 3.11 / 3.12 mock implementations.
+        """
+        rows = [EvidenceRow(id="r0", source_skill="x")]
+        sel = TraceSelection(id="s", profile_id="p", source="diff")
+        lin = DiffLineage(diff_id="d", role="stable", rank=0, baseline_profile_id="b")
+        f = self._legacy(evidence=rows, selection=sel, diff_lineage=lin)
+
+        calls = {"row": 0, "sel": 0, "lin": 0}
+
+        def _counted(key: str, original):
+            def wrapper(inner_self):
+                calls[key] += 1
+                return original(inner_self)
+
+            return wrapper
+
+        monkeypatch.setattr(EvidenceRow, "to_dict", _counted("row", EvidenceRow.to_dict))
+        monkeypatch.setattr(TraceSelection, "to_dict", _counted("sel", TraceSelection.to_dict))
+        monkeypatch.setattr(DiffLineage, "to_dict", _counted("lin", DiffLineage.to_dict))
+
+        d = f.to_dict()
+
+        assert calls == {"row": 1, "sel": 1, "lin": 1}
+        assert isinstance(d["evidence"][0], dict)
+        assert isinstance(d["selection"], dict)
+        assert isinstance(d["diff_lineage"], dict)
+
+
+class TestEvidenceReportEnvelope:
+    """v0.1 envelope on EvidenceReport JSON output."""
+
+    def test_to_dict_contains_envelope(self):
+        report = EvidenceReport(title="Test")
+        d = report.to_dict()
+        assert d["schema_version"] == "0.1"
+        assert d["producer"] == "nsys-ai"
+        assert isinstance(d["producer_version"], str) and d["producer_version"]
+
+    def test_envelope_does_not_displace_legacy_fields(self):
+        """Legacy keys (title, profile_path, findings) still appear unchanged."""
+        report = EvidenceReport(title="T", profile_path="/p/x.sqlite")
+        d = report.to_dict()
+        assert d["title"] == "T"
+        assert d["profile_path"] == "/p/x.sqlite"
+        assert d["findings"] == []
+
+    def test_from_dict_accepts_v01_envelope(self):
+        """Round-trip through to_dict / from_dict preserves the report."""
+        f = Finding(type="region", label="L", start_ns=10)
+        report = EvidenceReport(title="T", profile_path="/p", findings=[f])
+        restored = EvidenceReport.from_dict(report.to_dict())
+        assert restored.title == "T"
+        assert restored.profile_path == "/p"
+        assert len(restored.findings) == 1
+        assert restored.findings[0].label == "L"
+
+    def test_from_dict_accepts_legacy_payload(self):
+        """A pre-envelope payload (no schema_version) loads correctly."""
+        legacy = {
+            "title": "Legacy",
+            "profile_path": "/x.sqlite",
+            "findings": [{"type": "region", "label": "L", "start_ns": 0, "severity": "info"}],
+        }
+        report = EvidenceReport.from_dict(legacy)
+        assert report.title == "Legacy"
+        assert len(report.findings) == 1
+        assert report.findings[0].label == "L"
+
+    def test_from_dict_ignores_envelope_metadata(self):
+        """Envelope fields are informational; from_dict drops them silently."""
+        payload = {
+            "schema_version": "9.9",  # any value, even unknown
+            "producer": "ghostwriter",
+            "producer_version": "0.0.0",
+            "title": "T",
+            "profile_path": "",
+            "findings": [],
+        }
+        report = EvidenceReport.from_dict(payload)
+        assert report.title == "T"
+        assert report.findings == []
+
+    def test_json_round_trip_with_v01_findings(self):
+        rows = [EvidenceRow(id="r", source_skill="x")]
+        sel = TraceSelection(id="s", profile_id="p", source="diff")
+        f = Finding(
+            type="region",
+            label="L",
+            start_ns=10,
+            id="f",
+            category="communication",
+            evidence=rows,
+            selection=sel,
+        )
+        report = EvidenceReport(title="T", findings=[f])
+        s = json.dumps(report.to_dict(), indent=2)
+        restored = EvidenceReport.from_dict(json.loads(s))
+        assert restored.title == "T"
+        assert restored.findings[0].id == "f"
+        assert restored.findings[0].evidence[0].id == "r"
+        assert restored.findings[0].selection.profile_id == "p"
+
+    def test_save_load_round_trip(self, tmp_path):
+        from nsys_ai.annotation import load_findings, save_findings
+
+        f = Finding(type="region", label="L", start_ns=10, id="f0", category="idle")
+        report = EvidenceReport(title="Persist", findings=[f])
+        path = tmp_path / "findings.json"
+        save_findings(report, str(path))
+        loaded = load_findings(str(path))
+        assert loaded.title == "Persist"
+        assert loaded.findings[0].id == "f0"
+        assert loaded.findings[0].category == "idle"
