@@ -12,18 +12,68 @@ surfaces (CLI, GUI, agent, diff) share:
     DiffLineage      — links a Finding to the diff that surfaced it
     Diagnostic       — an agent's summarized diagnosis with verification command
 
-Existing models (``Finding``, ``EvidenceReport``) are unchanged in this slice
-and will be extended additively in a follow-up.
+``Finding`` carries optional v0.1 fields (id, category, confidence,
+evidence rows, selection, diff lineage, etc.) that the new surfaces
+populate. Existing producers/consumers that ignore the new fields keep
+working unchanged.
+
+``EvidenceReport`` JSON output carries an additive envelope
+(``schema_version``, ``producer``, ``producer_version``) so downstream
+tools can detect format compatibility.
 """
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from functools import cache
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from typing import Any, Literal
+
+# Field names on Finding that hold nested dataclass instances; serialized
+# separately via each nested type's to_dict() to avoid a wasted deep copy
+# through asdict() (which would materialize them only to be discarded).
+_FINDING_NESTED_FIELDS = frozenset({"evidence", "selection", "diff_lineage"})
+
+#: Current evidence-artifact schema version.
+#:
+#: Bumped on breaking changes to the JSON envelope or required fields.
+#: Backward-compatible additions (new optional fields) do not bump this.
+SCHEMA_VERSION = "0.1"
+
+#: Producer identifier embedded in evidence-artifact JSON envelopes.
+PRODUCER = "nsys-ai"
+
+
+@cache
+def _producer_version() -> str:
+    """Return the installed nsys-ai package version, or a dev marker.
+
+    Reads the distribution metadata directly via ``importlib.metadata`` so
+    ``EvidenceReport.to_dict`` stays self-contained — it does not pull in
+    ``nsys_ai/__init__.py`` (which would eagerly import the rest of the
+    package and reintroduce circular-import risk).
+
+    Cached for the lifetime of the process: the installed package version
+    is constant per interpreter, and ``importlib.metadata.version`` reads
+    distribution metadata from disk on every call without caching.
+    """
+    try:
+        return _pkg_version("nsys-ai")
+    except PackageNotFoundError:
+        return "0.0.0+dev"
 
 
 @dataclass
 class Finding:
-    """A single agent-authored finding to overlay on the timeline."""
+    """A single agent-authored finding to overlay on the timeline.
+
+    Required fields (``type``, ``label``, ``start_ns``) define a minimum
+    visual overlay. v0.1 optional fields enrich the finding with structured
+    evidence, category, confidence, source location, and diff provenance.
+
+    All v0.1 fields default to ``None`` and are dropped from
+    :meth:`to_dict` when unset, so legacy JSON output remains compact.
+    """
 
     type: str  # "highlight" | "region" | "marker"
     label: str
@@ -35,18 +85,76 @@ class Finding:
     severity: str = "info"  # "critical" | "warning" | "info"
     note: str = ""
 
+    # v0.1 additive fields — all optional, all drop from to_dict when None.
+    id: str | None = None
+    category: "FindingCategory | None" = None
+    confidence: float | None = None
+    evidence: list["EvidenceRow"] | None = None
+    selection: "TraceSelection | None" = None
+    explanation: str | None = None
+    suggested_actions: list[str] | None = None
+    false_positive_notes: list[str] | None = None
+    provenance: dict[str, Any] | None = None
+    diff_lineage: "DiffLineage | None" = None
+
     def to_dict(self) -> dict:
-        return {k: v for k, v in asdict(self).items() if v is not None}
+        # Walk fields() directly for scalar / primitive fields; nested
+        # dataclass fields are serialized via their own to_dict() to
+        # preserve each nested type's None-drop convention. Avoids the
+        # recursive deep copy that asdict() would perform on the nested
+        # fields only to be discarded here.
+        d: dict = {}
+        for f in fields(self):
+            if f.name in _FINDING_NESTED_FIELDS:
+                continue
+            v = getattr(self, f.name)
+            if v is None:
+                continue
+            # Shallow defensive copy for mutable container fields:
+            # top-level mutation of the returned dict (e.g.
+            # ``d["suggested_actions"].append(...)``) does not affect
+            # the source. Nested mutable values inside ``provenance`` /
+            # ``values`` etc. are still shared by reference — deep
+            # copies are intentionally avoided to keep ``to_dict``
+            # cheap, since the output is normally consumed by JSON
+            # serialization rather than mutated.
+            if isinstance(v, list):
+                d[f.name] = list(v)
+            elif isinstance(v, dict):
+                d[f.name] = dict(v)
+            else:
+                d[f.name] = v
+        if self.evidence is not None:
+            d["evidence"] = [e.to_dict() for e in self.evidence]
+        if self.selection is not None:
+            d["selection"] = self.selection.to_dict()
+        if self.diff_lineage is not None:
+            d["diff_lineage"] = self.diff_lineage.to_dict()
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Finding":
         valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
-        return cls(**{k: v for k, v in d.items() if k in valid_keys})
+        filtered = {k: v for k, v in d.items() if k in valid_keys}
+        # Rehydrate nested dataclass fields when present.
+        if filtered.get("evidence") is not None:
+            filtered["evidence"] = [EvidenceRow.from_dict(e) for e in filtered["evidence"]]
+        if filtered.get("selection") is not None:
+            filtered["selection"] = TraceSelection.from_dict(filtered["selection"])
+        if filtered.get("diff_lineage") is not None:
+            filtered["diff_lineage"] = DiffLineage.from_dict(filtered["diff_lineage"])
+        return cls(**filtered)
 
 
 @dataclass
 class EvidenceReport:
-    """A collection of findings for a profile, produced by an AI agent."""
+    """A collection of findings for a profile, produced by an AI agent.
+
+    The :meth:`to_dict` output carries the v0.1 envelope
+    (``schema_version``, ``producer``, ``producer_version``). The
+    :meth:`from_dict` reader accepts both v0.1 envelopes and legacy
+    (envelope-free) JSON payloads.
+    """
 
     title: str
     profile_path: str = ""
@@ -54,6 +162,9 @@ class EvidenceReport:
 
     def to_dict(self) -> dict:
         return {
+            "schema_version": SCHEMA_VERSION,
+            "producer": PRODUCER,
+            "producer_version": _producer_version(),
             "title": self.title,
             "profile_path": self.profile_path,
             "findings": [f.to_dict() for f in self.findings],
@@ -61,6 +172,9 @@ class EvidenceReport:
 
     @classmethod
     def from_dict(cls, d: dict) -> "EvidenceReport":
+        # Envelope fields (schema_version / producer / producer_version)
+        # are informational only — readers ignore them. Legacy payloads
+        # without an envelope load identically.
         findings = [Finding.from_dict(f) for f in d.get("findings", [])]
         return cls(
             title=d.get("title", "Untitled"),
