@@ -46,6 +46,7 @@ def _cutracer_check():
     # Python package
     if importlib.util.find_spec("cutracer") is not None:
         import cutracer as _ct  # type: ignore[import]
+
         version = getattr(_ct, "__version__", "unknown")
         print(f"  cutracer Python package : OK (v{version})")
     else:
@@ -141,6 +142,7 @@ def _cutracer_run(args, _profile):
         )
 
     from nsys_ai.cutracer.correlator import normalize_kernel_name
+
     kernel_filter = [normalize_kernel_name(t.name) for t in plan.targets]
 
     config = RunConfig(
@@ -155,8 +157,10 @@ def _cutracer_run(args, _profile):
         # Detect CUDA version from the local CUDA toolkit for image suggestion.
         # This does not read CUDA details from the Nsight profile itself.
         from nsys_ai.cutracer.installer import detect_cuda_version
+
         cuda_ver = detect_cuda_version()
         from nsys_ai.cutracer.runner import _cuda_image_for_version
+
         modal_cfg = ModalConfig(
             gpu=modal_gpu,
             cuda_image=_cuda_image_for_version(cuda_ver),
@@ -166,21 +170,26 @@ def _cutracer_run(args, _profile):
 
         if modal_save:
             import stat as _stat
+
             save_path = _Path(modal_save)
             save_path.write_text(script)
-            save_path.chmod(save_path.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+            save_path.chmod(
+                save_path.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH
+            )
             print(f"Modal app saved to: {save_path}")
             print(f"Run with: modal run {save_path}")
         elif backend == "modal-run":
             # Actually invoke modal run
             import stat as _stat
             import tempfile
+
             with tempfile.NamedTemporaryFile(suffix="_cutracer.py", mode="w", delete=False) as tf:
                 tf.write(script)
                 tmp = _Path(tf.name)
             tmp.chmod(tmp.stat().st_mode | _stat.S_IEXEC)
             print(f"==> Running: modal run {tmp}")
             import subprocess as _sp  # nosec B404
+
             result = _sp.run(["modal", "run", str(tmp)])  # nosec B603 B607
             sys.exit(result.returncode)
         else:
@@ -275,9 +284,13 @@ def _cutracer_plan(args, _profile):
         script = format_plan_script(plan, output_dir=output_dir, launch_cmd=launch_cmd)
         if save_path:
             from pathlib import Path
+
             Path(save_path).write_text(script)
             import stat
-            Path(save_path).chmod(Path(save_path).stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+            Path(save_path).chmod(
+                Path(save_path).stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH
+            )
             print(f"Script saved to: {save_path}  (chmod +x applied)")
         else:
             print(script, end="")
@@ -360,6 +373,24 @@ def _cmd_info(args, _profile):
 
 
 def _cmd_analyze(args, _profile):
+    fmt = getattr(args, "format", "text") or "text"
+    if fmt == "json":
+        _cmd_analyze_json(args, _profile)
+        return
+
+    # Text / markdown pipeline requires a trim window (run_analyze →
+    # build_nvtx_tree dereferences trim[0]). At the parser level --trim
+    # is optional so that --format json can run on the full profile;
+    # enforce the text-mode requirement here with a clear error.
+    if not getattr(args, "trim", None):
+        print(
+            "Error: 'analyze' without --format json requires --trim START_S END_S. "
+            "Use --format json to run on the full profile span.",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+
     from nsys_ai.report import format_report_markdown, format_report_terminal, run_analyze
 
     with _profile.open(args.profile) as prof:
@@ -374,6 +405,73 @@ def _cmd_analyze(args, _profile):
             with open(args.output, "w", encoding="utf-8", newline="\n") as f:
                 f.write(md)
             print(f"Markdown report written to {args.output}")
+
+
+def _write_evidence_report_or_die(report, out_path: str) -> None:
+    """Persist an ``EvidenceReport`` to disk via ``save_findings``.
+
+    Shared by ``analyze --format json`` and ``evidence build`` so the two
+    commands stay aligned on directory creation, error reporting, and the
+    "Saved N finding(s)" stderr line.
+    """
+    from nsys_ai.annotation import save_findings
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir and not os.path.exists(out_dir):
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            print(
+                f"Error: Failed to create output directory '{out_dir}': {e}",
+                file=sys.stderr,
+                flush=True,
+            )
+            sys.exit(1)
+    try:
+        save_findings(report, out_path)
+    except OSError as e:
+        print(
+            f"Error: Failed to write findings to '{out_path}': {e}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+    print(
+        f"Saved {len(report.findings)} finding(s) → {out_path}",
+        flush=True,
+        file=sys.stderr,
+    )
+
+
+def _cmd_analyze_json(args, _profile):
+    """Emit a v0.1 evidence findings report as JSON.
+
+    Shares the EvidenceBuilder pipeline with the legacy ``evidence build``
+    command; this is the canonical CLI entry point for machine-readable
+    findings going forward.
+    """
+    import json as _json
+
+    from nsys_ai.evidence_builder import EvidenceBuilder
+
+    with _profile.open(args.profile) as prof:
+        trim = _parse_trim(args)
+        device = getattr(args, "gpu", 0) or 0
+        builder = EvidenceBuilder(prof, device=device, trim=trim)
+        report = builder.build()
+
+        # ``report.profile_path`` (and the nested ``selection.profile_id``
+        # on each Finding) is sourced from the opened Profile's path —
+        # which is the resolved ``.sqlite`` sidecar for ``.nsys-rep``
+        # inputs. We deliberately do not overwrite it with ``args.profile``
+        # here, so the envelope and every nested identifier agree on a
+        # single source of truth.
+        payload = report.to_dict()
+        print(_json.dumps(payload, indent=2))
+
+        out = getattr(args, "output", None)
+        if out:
+            _write_evidence_report_or_die(report, out)
 
 
 def _cmd_report(args, _profile):
@@ -635,7 +733,9 @@ def _cmd_iters(args, _profile):
     from nsys_ai.overlap import detect_iterations, format_iterations
 
     with _profile.open(args.profile) as prof:
-        device = args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
+        device = (
+            args.gpu if args.gpu is not None else (prof.meta.devices[0] if prof.meta.devices else 0)
+        )
         print(format_iterations(detect_iterations(prof, device, _parse_trim(args))))
 
 
@@ -831,7 +931,13 @@ def _cmd_chat(args, _profile):
 
 
 def _cmd_evidence(args, _profile):
-    """Build evidence findings via EvidenceBuilder for timeline overlay."""
+    """Build evidence findings via EvidenceBuilder for timeline overlay.
+
+    Deprecated: prefer ``nsys-ai analyze --format json`` going forward.
+    The two commands share the same EvidenceBuilder pipeline and emit
+    the same v0.1 envelope; ``evidence build`` is kept as a backwards
+    compatible alias and will be removed in a future release.
+    """
     import json
 
     from nsys_ai.evidence_builder import EvidenceBuilder
@@ -842,11 +948,16 @@ def _cmd_evidence(args, _profile):
         )
         return
 
-    with _profile.open(args.profile) as prof:
-        trim = None
-        if getattr(args, "trim", None):
-            trim = (int(args.trim[0] * 1e9), int(args.trim[1] * 1e9))
+    print(
+        "warning: 'nsys-ai evidence build' is deprecated — use "
+        "'nsys-ai analyze --format json' instead. This command will be "
+        "removed in a future release.",
+        file=sys.stderr,
+        flush=True,
+    )
 
+    with _profile.open(args.profile) as prof:
+        trim = _parse_trim(args)
         device = getattr(args, "gpu", 0) or 0
         builder = EvidenceBuilder(prof, device=device, trim=trim)
 
@@ -859,18 +970,18 @@ def _cmd_evidence(args, _profile):
         else:
             report = builder.build()
 
-        findings = [f.to_dict() for f in report.findings]
+        # ``report.profile_path`` comes from the opened Profile (which
+        # may resolve to a ``.sqlite`` sidecar for ``.nsys-rep`` inputs).
+        # Leave it as-is so the envelope and the nested
+        # ``selection.profile_id`` values on each Finding agree on one
+        # source of truth.
         fmt = getattr(args, "format", "json")
         if fmt == "json":
-            out_report = {
-                "title": getattr(report, "title", "Evidence Report"),
-                "profile_path": getattr(report, "profile_path", args.profile),
-                "findings": findings,
-            }
-            print(json.dumps(out_report, indent=2))
+            payload = report.to_dict()
+            print(json.dumps(payload, indent=2))
         else:
             sev_icons = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
-            print(f"── Evidence Findings ({len(findings)}) ──")
+            print(f"── Evidence Findings ({len(report.findings)}) ──")
             for f in report.findings:
                 icon = sev_icons.get(f.severity, "⚪")
                 dur_ms = (f.end_ns - f.start_ns) / 1e6 if f.end_ns else 0
@@ -880,28 +991,7 @@ def _cmd_evidence(args, _profile):
 
         out = getattr(args, "output", None)
         if out:
-            from nsys_ai.annotation import save_findings
-
-            out_dir = os.path.dirname(out)
-            if out_dir and not os.path.exists(out_dir):
-                try:
-                    os.makedirs(out_dir, exist_ok=True)
-                except OSError as e:
-                    print(
-                        f"Error: Failed to create output directory '{out_dir}': {e}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    sys.exit(1)
-
-            try:
-                save_findings(report, out)
-            except OSError as e:
-                print(
-                    f"Error: Failed to write findings to '{out}': {e}", file=sys.stderr, flush=True
-                )
-                sys.exit(1)
-            print(f"Saved {len(findings)} finding(s) → {out}", flush=True, file=sys.stderr)
+            _write_evidence_report_or_die(report, out)
 
 
 def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
