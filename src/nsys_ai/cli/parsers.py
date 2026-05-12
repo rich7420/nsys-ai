@@ -581,10 +581,37 @@ def _register_legacy_commands(sub):
     _register_info_parser(sub)
 
     p = sub.add_parser(
-        "analyze", help="Full auto-report: bottlenecks, overlap, iters, NVTX hierarchy"
+        "analyze",
+        help=(
+            "Full auto-report: bottlenecks, overlap, iters, NVTX hierarchy. "
+            "Use --format json to emit v0.1 evidence findings JSON instead."
+        ),
     )
-    _add_gpu_trim(p)
-    p.add_argument("-o", "--output", default=None, help="Write markdown report to file")
+    # --trim is optional at the parser level so `--format json` can run on
+    # the full profile span; the text path enforces a clear error when
+    # --trim is missing (see _cmd_analyze).
+    _add_gpu_trim(p, trim_required=False)
+    p.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help=(
+            "Output file. With --format text, writes the markdown narrative report. "
+            "With --format json, writes the v0.1 findings JSON via save_findings()."
+        ),
+    )
+    p.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help=(
+            "Output format. 'text' (default) prints the narrative report to stdout "
+            "and writes markdown to --output if given — requires --trim. "
+            "'json' switches to v0.1 evidence findings JSON (envelope + Finding list); "
+            "--trim is optional and narrows the window if provided. "
+            "Same JSON shape as the legacy 'evidence build' command."
+        ),
+    )
     p.set_defaults(handler=_cmd_analyze)
 
     p = sub.add_parser("summary", help="GPU kernel summary with top kernels")
