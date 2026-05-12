@@ -240,6 +240,12 @@ def get_profile_id(
 
     # NULLS LAST: SQLite defaults to NULLS FIRST, DuckDB to NULLS LAST —
     # pin it so two engine adapters on the same data hash identically.
+    #
+    # Determinism rule for ``_rows`` queries: ``ORDER BY`` must cover the
+    # superset of every SELECTed column. Otherwise two rows that tie on
+    # the partial ORDER BY can have *different* selected values, and the
+    # relative order between them is engine-defined — VACUUM, schema
+    # rebuild, or a different adapter can flip them and change the hash.
     parts: list[tuple[str, typing.Any]] = [
         ("session_start_utc_ns", _scalar("SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME")),
         # ANALYSIS_DETAILS is conventionally single-row, but serialise all
@@ -249,13 +255,16 @@ def get_profile_id(
             "analysis_details",
             _rows(
                 "SELECT duration, startTime, stopTime FROM ANALYSIS_DETAILS "
-                "ORDER BY startTime, stopTime"
+                "ORDER BY startTime NULLS LAST, stopTime NULLS LAST, duration NULLS LAST"
             ),
         ),
         # GPU id + name works on every Nsight schema we've seen.
         (
             "gpus",
-            _rows("SELECT id, name FROM TARGET_INFO_GPU ORDER BY id NULLS LAST"),
+            _rows(
+                "SELECT id, name FROM TARGET_INFO_GPU "
+                "ORDER BY id NULLS LAST, name NULLS LAST"
+            ),
         ),
         # uuid lives on TARGET_INFO_GPU in newer Nsight exports and on
         # TARGET_INFO_CUDA_DEVICE in older ones (and in our minimal test
@@ -263,17 +272,26 @@ def get_profile_id(
         # mismatch degrades only that part, not the whole id.
         (
             "gpu_uuids",
-            _rows("SELECT uuid FROM TARGET_INFO_GPU ORDER BY id NULLS LAST"),
+            _rows(
+                "SELECT uuid FROM TARGET_INFO_GPU "
+                "ORDER BY id NULLS LAST, uuid NULLS LAST"
+            ),
         ),
+        # ``TARGET_INFO_CUDA_DEVICE`` commonly carries multiple rows per
+        # (gpuId, cudaId) — one per process — so ``pid`` and ``uuid`` are
+        # required tie-breakers to make the hash stable across engines.
         (
             "cuda_device_uuids",
             _rows(
                 "SELECT uuid FROM TARGET_INFO_CUDA_DEVICE "
-                "ORDER BY gpuId NULLS LAST, cudaId NULLS LAST"
+                "ORDER BY gpuId NULLS LAST, cudaId NULLS LAST, "
+                "pid NULLS LAST, uuid NULLS LAST"
             ),
         ),
         (
             "pids",
+            # DISTINCT guarantees no ties on the SELECTed column, so
+            # ORDER BY globalPid alone is total.
             _rows(
                 "SELECT DISTINCT globalPid FROM ANALYSIS_FILE "
                 "ORDER BY globalPid NULLS LAST"
