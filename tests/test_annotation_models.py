@@ -790,6 +790,27 @@ class TestEvidenceReportEnvelope:
         restored = EvidenceReport.from_dict({"title": "T", "profile_path": "/p"})
         assert restored.profile_id == ""
 
+    def test_profile_id_is_keyword_only(self):
+        """Regression for Copilot review: ``profile_id`` was originally
+        inserted before ``profile_path`` in the dataclass fields, which
+        silently broke positional callers (``EvidenceReport("T", "/p")``
+        would have bound ``/p`` to ``profile_id`` instead of
+        ``profile_path``). Marking it ``kw_only=True`` preserves the
+        positional signature and forces explicit naming.
+        """
+        import pytest
+
+        # Positional binding of ``profile_id`` is forbidden:
+        with pytest.raises(TypeError):
+            EvidenceReport("T", "/p", [], "nsys1:sha256:abc")  # type: ignore[misc]
+
+        # Old positional usage (title, profile_path[, findings]) still
+        # binds to the same fields it always did.
+        report = EvidenceReport("T", "/some/profile.sqlite")
+        assert report.title == "T"
+        assert report.profile_path == "/some/profile.sqlite"
+        assert report.profile_id == ""  # default kept
+
     def test_from_dict_accepts_v01_envelope(self):
         """Round-trip through to_dict / from_dict preserves the report."""
         f = Finding(type="region", label="L", start_ns=10)

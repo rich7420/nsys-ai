@@ -9,6 +9,7 @@ artefacts (envelope and ``TraceSelection``).
 
 import hashlib
 import json
+import os
 import typing
 from dataclasses import dataclass, field
 
@@ -148,7 +149,9 @@ PROFILE_ID_VERSION = "nsys1"
 contributing columns or the canonical serialisation change."""
 
 
-def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str:
+def get_profile_id(
+    conn: typing.Any, *, fallback_path: str | os.PathLike[str] | None = None
+) -> str:
     """Return a stable content-derived id for a Nsight Systems profile.
 
     The hash spans only fields stamped at *profile-capture* time, so it
@@ -196,12 +199,18 @@ def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str
        ``ORDER BY ... NULLS LAST`` clause; the offending contribution
        is caught and degraded to empty rather than crashing.
     """
+    # Coerce ``fallback_path`` once: callers often pass ``pathlib.Path``
+    # (e.g. via ``Profile(Path(...))`` → ``Profile.path``). Both fallback
+    # branches below would otherwise crash with AttributeError on
+    # ``.encode("utf-8")``.
+    fallback_str = os.fspath(fallback_path) if fallback_path is not None else None
+
     # None-safe shortcut: wrap_connection(None) returns a SQLiteAdapter
     # over None, whose .execute() raises AttributeError (not a DB error),
     # so the loop's try/except wouldn't catch it. Skip the queries.
     if conn is None:
-        if fallback_path:
-            digest = hashlib.sha256(fallback_path.encode("utf-8")).hexdigest()
+        if fallback_str:
+            digest = hashlib.sha256(fallback_str.encode("utf-8")).hexdigest()
             return f"{PROFILE_ID_VERSION}:path:{digest}"
         empty = hashlib.sha256(b"").hexdigest()
         return f"{PROFILE_ID_VERSION}:sha256:{empty}"
@@ -274,8 +283,8 @@ def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str
     def _empty(v: typing.Any) -> bool:
         return v is None or v == "" or v == [] or v == 0
 
-    if all(_empty(v) for _, v in parts) and fallback_path:
-        digest = hashlib.sha256(fallback_path.encode("utf-8")).hexdigest()
+    if all(_empty(v) for _, v in parts) and fallback_str:
+        digest = hashlib.sha256(fallback_str.encode("utf-8")).hexdigest()
         return f"{PROFILE_ID_VERSION}:path:{digest}"
 
     # JSON canonical: structured, unambiguous, no separator collisions.

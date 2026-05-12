@@ -197,6 +197,27 @@ def test_get_profile_id_none_conn_with_fallback():
     assert _PATH_RE.match(pid), pid
 
 
+def test_get_profile_id_accepts_pathlib_fallback():
+    """Regression for Copilot review: ``Profile.path`` is often a
+    ``pathlib.Path`` in tests. Both fallback branches must coerce it
+    via ``os.fspath`` before ``.encode("utf-8")`` — passing a Path
+    used to crash with ``AttributeError`` in the very scenario the
+    fallback is meant to handle."""
+    from pathlib import Path
+
+    # conn=None branch
+    pid_none = get_profile_id(None, fallback_path=Path("/some/profile.sqlite"))
+    assert _PATH_RE.match(pid_none), pid_none
+    # Equality with str-form to confirm the coercion is value-stable.
+    assert pid_none == get_profile_id(None, fallback_path="/some/profile.sqlite")
+
+    # Empty-conn → fallback branch (real conn, no Nsight tables)
+    empty_conn = sqlite3.connect(":memory:")
+    pid_empty = get_profile_id(empty_conn, fallback_path=Path("/some/profile.sqlite"))
+    assert _PATH_RE.match(pid_empty), pid_empty
+    assert pid_empty == get_profile_id(empty_conn, fallback_path="/some/profile.sqlite")
+
+
 def test_get_profile_id_none_conn_without_fallback_is_null_sentinel():
     """``conn=None`` and no fallback yields the recognisable empty-sha256
     sentinel — every such caller collapses to the same value, which is

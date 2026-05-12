@@ -7,6 +7,7 @@ to produce findings with exact nanosecond timestamps for timeline overlay.
 
 import inspect
 import logging
+import os
 from collections.abc import Callable
 
 from .annotation import EvidenceReport, Finding
@@ -85,7 +86,11 @@ class EvidenceBuilder:
         from .fingerprint import get_profile_id
         from .skills.registry import get_skill
 
-        profile_path = getattr(self.prof, "path", "")
+        # Coerce to str up-front: ``Profile.path`` is whatever the caller
+        # passed (often ``pathlib.Path`` in tests). Both ``get_profile_id``
+        # and downstream JSON serialisation need a real ``str``.
+        raw_path = getattr(self.prof, "path", None)
+        profile_path: str = os.fspath(raw_path) if raw_path is not None else ""
         # ``profile_id`` is a content-derived stable hash (see
         # ``fingerprint.get_profile_id``). It uses ``self.prof.conn``
         # because the META_DATA / TARGET_INFO tables it reads are *not*

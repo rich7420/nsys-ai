@@ -157,9 +157,13 @@ class EvidenceReport:
     """
 
     title: str
-    profile_id: str = ""
+    # ``profile_id`` is keyword-only so adding it after the original
+    # ``title`` / ``profile_path`` fields does not shift the positional
+    # signature — pre-v0.1 callers using ``EvidenceReport("T", "/p")``
+    # still get ``profile_path="/p"``, not ``profile_id="/p"``.
     profile_path: str = ""
     findings: list[Finding] = field(default_factory=list)
+    profile_id: str = field(default="", kw_only=True)
 
     def to_dict(self) -> dict:
         return {
