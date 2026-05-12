@@ -2,8 +2,12 @@
 fingerprint.py — Detects the ML framework and network topology from Nsight SQLite traces.
 
 Extracts a ProfileFingerprint efficiently using O(1) string pool queries.
+Also exposes ``get_profile_id`` — a content-derived stable identifier
+for a profile, used as the canonical ``profile_id`` in evidence
+artefacts (envelope and ``TraceSelection``).
 """
 
+import hashlib
 import typing
 from dataclasses import dataclass, field
 
@@ -132,3 +136,91 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
         nic_summary=nic_summary,
         precision_notes=[],
     )
+
+
+# ---------------------------------------------------------------------------
+# profile_id — stable content-derived identifier
+# ---------------------------------------------------------------------------
+
+PROFILE_ID_VERSION = "nsys1"
+"""Algorithm tag for :func:`get_profile_id`. Bump (``nsys2``, …) if the
+contributing columns or the canonical serialisation change."""
+
+
+def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str:
+    """Return a stable content-derived id for a Nsight Systems profile.
+
+    The hash spans only fields stamped at *profile-capture* time, so it
+    survives ``.nsys-rep`` → ``.sqlite`` re-export, ``VACUUM``,
+    ``journal_mode`` changes, and filesystem moves:
+
+      - ``TARGET_INFO_SESSION_START_TIME.utcEpochNs``
+      - ``ANALYSIS_DETAILS`` ``duration / startTime / stopTime``
+      - ``TARGET_INFO_GPU`` rows (``id``, ``name``, hardware ``uuid``)
+      - distinct ``ANALYSIS_FILE.globalPid`` values
+      - ``CUPTI_ACTIVITY_KIND_KERNEL`` row count
+
+    Format::
+
+        nsys1:sha256:<64-hex>   # preferred — content-derived
+        nsys1:path:<64-hex>     # fallback — when no Nsight metadata is reachable
+
+    The fallback fires for backends that expose only the parquet cache
+    (``backend='parquetdir'``) where META_DATA / TARGET_INFO tables were
+    never materialised. Callers should pass ``self.prof.conn`` (the
+    SQLite source where available); the function never reads
+    ``self.prof.db`` semantics — it just runs SQL.
+    """
+    adapter = wrap_connection(conn)
+    parts: list[tuple[str, str]] = []
+
+    def _one(sql: str) -> str:
+        try:
+            row = adapter.execute(sql).fetchone()
+            return str(row[0]) if row and row[0] is not None else ""
+        except DB_ERRORS:
+            return ""
+
+    def _all(sql: str) -> str:
+        try:
+            rows = adapter.execute(sql).fetchall()
+            return ";".join(str(r[0]) for r in rows if r and r[0] is not None)
+        except DB_ERRORS:
+            return ""
+
+    parts.append(
+        ("session_start_utc_ns", _one("SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME"))
+    )
+    parts.append(
+        (
+            "trace_range",
+            _one(
+                "SELECT duration || '|' || startTime || '|' || stopTime FROM ANALYSIS_DETAILS"
+            ),
+        )
+    )
+    parts.append(
+        (
+            "gpus",
+            _all(
+                "SELECT id || '|' || name || '|' || COALESCE(uuid, '') "
+                "FROM TARGET_INFO_GPU ORDER BY id"
+            ),
+        )
+    )
+    parts.append(
+        ("pids", _all("SELECT DISTINCT globalPid FROM ANALYSIS_FILE ORDER BY globalPid"))
+    )
+    parts.append(("kernel_count", _one("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL")))
+
+    canonical = "\n".join(f"{k}={v}" for k, v in parts)
+
+    # If every contribution is empty the conn carries no Nsight metadata
+    # (e.g. parquetdir backend). Fall back to a clearly-labelled
+    # path-derived id rather than collapse every such profile to the same
+    # constant hash.
+    if not any(v for _, v in parts) and fallback_path:
+        digest = hashlib.sha256(fallback_path.encode("utf-8")).hexdigest()
+        return f"{PROFILE_ID_VERSION}:path:{digest}"
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return f"{PROFILE_ID_VERSION}:sha256:{digest}"

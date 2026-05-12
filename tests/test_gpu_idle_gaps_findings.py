@@ -264,7 +264,8 @@ class TestSerialization:
 class TestEvidenceBuilderIntegration:
     def test_builder_passes_profile_id_to_idle_gaps(self, minimal_nsys_db_path):
         """Real DB integration: TraceSelections produced under EvidenceBuilder
-        carry the profile path as profile_id (the current placeholder identity)."""
+        carry the content-derived ``profile_id`` (``nsys1:sha256:...``)
+        from ``fingerprint.get_profile_id``, *not* the filesystem path."""
         from nsys_ai.evidence_builder import EvidenceBuilder
         from nsys_ai.profile import Profile
 
@@ -272,15 +273,18 @@ class TestEvidenceBuilderIntegration:
             builder = EvidenceBuilder(prof, device=0)
             report = builder.build(only=["idle_gaps"])
 
-        # The minimal fixture may not produce idle-gap findings on every
-        # run; we only assert that *if* idle-gap findings exist they
-        # carry profile_id from the profile path.
+        # The envelope and every nested selection share one profile_id;
+        # the minimal fixture may or may not produce idle-gap findings on
+        # any given run, so we only assert when at least one exists.
         idle = [f for f in report.findings if f.category == "idle"]
         if idle:
-            expected = str(minimal_nsys_db_path)
+            assert report.profile_id.startswith("nsys1:"), report.profile_id
+            assert report.profile_id != str(minimal_nsys_db_path), (
+                "profile_id must be a hash, not the filesystem path"
+            )
             for f in idle:
                 assert f.selection is not None
-                assert f.selection.profile_id == expected
+                assert f.selection.profile_id == report.profile_id
                 assert f.selection.source == "skill:gpu_idle_gaps"
 
     def test_builder_still_works_with_legacy_single_arg_skills(self, minimal_nsys_db_path):

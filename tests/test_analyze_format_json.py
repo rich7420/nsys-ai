@@ -52,6 +52,9 @@ class TestAnalyzeFormatJson:
         assert isinstance(payload["producer_version"], str) and payload["producer_version"]
         assert "findings" in payload
         assert isinstance(payload["findings"], list)
+        # v0.1 content-derived profile id
+        assert isinstance(payload["profile_id"], str)
+        assert payload["profile_id"].startswith("nsys1:"), payload["profile_id"]
 
     def test_profile_path_present(self, minimal_nsys_db_path):
         """Envelope contains a profile_path string sourced from the opened Profile."""
@@ -68,13 +71,12 @@ class TestAnalyzeFormatJson:
         assert payload["profile_path"] == str(minimal_nsys_db_path)
 
     def test_envelope_and_selection_profile_id_agree(self, minimal_nsys_db_path):
-        """Single source of truth: envelope profile_path matches every
+        """Single source of truth: envelope profile_id matches every
         Finding.selection.profile_id inside the same payload.
 
-        Regression guard for the v0.1 identifier-consistency bug where
-        the CLI used to override envelope.profile_path independently of
-        the resolved Profile.path that EvidenceBuilder stamps onto
-        selection.profile_id.
+        ``profile_id`` is the content-derived hash (``nsys1:sha256:...``)
+        from ``fingerprint.get_profile_id`` — both the envelope and every
+        ``TraceSelection`` produced during the same build must carry it.
         """
         from nsys_ai import profile as profile_module
         from nsys_ai.cli.handlers import _cmd_analyze
@@ -83,14 +85,15 @@ class TestAnalyzeFormatJson:
         stdout, _ = _capture(_cmd_analyze, args, profile_module)
         payload = json.loads(stdout)
 
-        envelope_path = payload["profile_path"]
+        envelope_id = payload["profile_id"]
+        assert envelope_id.startswith("nsys1:"), envelope_id
         for f in payload["findings"]:
             sel = f.get("selection")
             if sel is None:
                 continue
-            assert sel["profile_id"] == envelope_path, (
+            assert sel["profile_id"] == envelope_id, (
                 f"Finding {f.get('id')} selection.profile_id={sel['profile_id']!r} "
-                f"disagrees with envelope profile_path={envelope_path!r}"
+                f"disagrees with envelope profile_id={envelope_id!r}"
             )
 
     def test_no_deprecation_warning_for_analyze(self, minimal_nsys_db_path):
@@ -115,10 +118,13 @@ class TestAnalyzeFormatJson:
         stdout, _ = _capture(_cmd_analyze, args, profile_module)
         payload = json.loads(stdout)
         idle = [f for f in payload["findings"] if f.get("category") == "idle"]
+        envelope_id = payload["profile_id"]
         for f in idle:
             assert f.get("id"), "Finding must have an id when v0.1-aware"
             assert "selection" in f, "Idle findings should have a selection"
-            assert f["selection"]["profile_id"] == str(minimal_nsys_db_path)
+            # Selection.profile_id is the same content-derived hash carried
+            # by the envelope — both sourced from EvidenceBuilder context.
+            assert f["selection"]["profile_id"] == envelope_id
             assert f["selection"]["source"] == "skill:gpu_idle_gaps"
 
     def test_writes_to_output_file_when_provided(self, minimal_nsys_db_path, tmp_path):

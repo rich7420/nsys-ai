@@ -157,6 +157,7 @@ class EvidenceReport:
     """
 
     title: str
+    profile_id: str = ""
     profile_path: str = ""
     findings: list[Finding] = field(default_factory=list)
 
@@ -166,6 +167,7 @@ class EvidenceReport:
             "producer": PRODUCER,
             "producer_version": _producer_version(),
             "title": self.title,
+            "profile_id": self.profile_id,
             "profile_path": self.profile_path,
             "findings": [f.to_dict() for f in self.findings],
         }
@@ -173,11 +175,12 @@ class EvidenceReport:
     @classmethod
     def from_dict(cls, d: dict) -> "EvidenceReport":
         # Envelope fields (schema_version / producer / producer_version)
-        # are informational only — readers ignore them. Legacy payloads
-        # without an envelope load identically.
+        # are informational only — readers ignore them. Pre-profile_id
+        # payloads load with an empty profile_id (additive, not breaking).
         findings = [Finding.from_dict(f) for f in d.get("findings", [])]
         return cls(
             title=d.get("title", "Untitled"),
+            profile_id=d.get("profile_id", ""),
             profile_path=d.get("profile_path", ""),
             findings=findings,
         )

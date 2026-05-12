@@ -1,8 +1,9 @@
 """Tests for framework fingerprinting logic."""
 
+import re
 import sqlite3
 
-from nsys_ai.fingerprint import get_fingerprint
+from nsys_ai.fingerprint import PROFILE_ID_VERSION, get_fingerprint, get_profile_id
 
 
 def build_mock_db(
@@ -80,3 +81,111 @@ def test_legacy_fallback():
 
     fp = get_fingerprint(conn)
     assert fp.framework == "DeepSpeed"
+
+
+# ---------------------------------------------------------------------------
+# get_profile_id — content-derived stable identifier
+# ---------------------------------------------------------------------------
+
+
+_SHA256_RE = re.compile(r"^nsys1:sha256:[0-9a-f]{64}$")
+_PATH_RE = re.compile(r"^nsys1:path:[0-9a-f]{64}$")
+
+
+def _nsight_meta_db(
+    *,
+    session_start_ns: int = 1_700_000_000_000_000_000,
+    duration_ns: int = 100_000_000,
+    gpus: list[tuple[int, str, str]] | None = None,
+    pids: list[int] | None = None,
+    kernel_count: int = 0,
+) -> sqlite3.Connection:
+    """Build an in-memory sqlite that looks enough like a Nsight export
+    for ``get_profile_id`` to read its META / TARGET_INFO tables.
+    """
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE TARGET_INFO_SESSION_START_TIME (utcEpochNs INTEGER)")
+    c.execute("INSERT INTO TARGET_INFO_SESSION_START_TIME VALUES (?)", (session_start_ns,))
+    c.execute(
+        "CREATE TABLE ANALYSIS_DETAILS "
+        "(globalVid INTEGER, duration INTEGER, startTime INTEGER, stopTime INTEGER)"
+    )
+    c.execute(
+        "INSERT INTO ANALYSIS_DETAILS VALUES (1, ?, 0, ?)",
+        (duration_ns, duration_ns),
+    )
+    c.execute("CREATE TABLE TARGET_INFO_GPU (id INTEGER, name TEXT, uuid TEXT)")
+    for gid, name, uuid in gpus or []:
+        c.execute("INSERT INTO TARGET_INFO_GPU VALUES (?, ?, ?)", (gid, name, uuid))
+    c.execute("CREATE TABLE ANALYSIS_FILE (id INTEGER, filename TEXT, globalPid INTEGER)")
+    for i, pid in enumerate(pids or []):
+        c.execute("INSERT INTO ANALYSIS_FILE VALUES (?, '/tmp/x', ?)", (i, pid))
+    c.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (correlationId INTEGER)")
+    for i in range(kernel_count):
+        c.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?)", (i,))
+    conn.commit()
+    return conn
+
+
+def test_get_profile_id_format():
+    """Default-shaped result is ``nsys1:sha256:<64-hex>``."""
+    conn = _nsight_meta_db()
+    pid = get_profile_id(conn)
+    assert _SHA256_RE.match(pid), pid
+    assert pid.startswith(f"{PROFILE_ID_VERSION}:sha256:")
+
+
+def test_get_profile_id_deterministic():
+    """Two builds of the same META content yield the same id."""
+    a = _nsight_meta_db(
+        gpus=[(0, "NVIDIA H100", "abc-uuid-0")], pids=[1234, 5678], kernel_count=10
+    )
+    b = _nsight_meta_db(
+        gpus=[(0, "NVIDIA H100", "abc-uuid-0")], pids=[1234, 5678], kernel_count=10
+    )
+    assert get_profile_id(a) == get_profile_id(b)
+
+
+def test_get_profile_id_differs_on_content_change():
+    base = _nsight_meta_db(kernel_count=10)
+    # Different kernel count alone changes the id.
+    other = _nsight_meta_db(kernel_count=11)
+    assert get_profile_id(base) != get_profile_id(other)
+    # Different GPU set alone changes the id.
+    diff_gpu = _nsight_meta_db(gpus=[(0, "NVIDIA H100", "xyz")], kernel_count=10)
+    assert get_profile_id(base) != get_profile_id(diff_gpu)
+
+
+def test_get_profile_id_path_independent():
+    """``profile_id`` is content-derived; fallback_path does not influence
+    the content hash when META tables are present."""
+    conn = _nsight_meta_db(kernel_count=3)
+    assert get_profile_id(conn, fallback_path="/a/x.sqlite") == get_profile_id(
+        conn, fallback_path="/b/y.sqlite"
+    )
+
+
+def test_get_profile_id_missing_tables_falls_back_to_path():
+    """Empty conn (no Nsight tables) + fallback_path → nsys1:path:..."""
+    conn = sqlite3.connect(":memory:")
+    pid = get_profile_id(conn, fallback_path="/some/profile.sqlite")
+    assert _PATH_RE.match(pid), pid
+
+
+def test_get_profile_id_missing_tables_without_fallback_is_constant_hash():
+    """Empty conn + no fallback → constant nsys1:sha256 (degraded but valid)."""
+    pid = get_profile_id(sqlite3.connect(":memory:"))
+    assert _SHA256_RE.match(pid), pid
+
+
+def test_get_profile_id_partial_metadata_still_content_path():
+    """If *any* META contribution is non-empty we stay on the sha256 path,
+    even when fallback_path is supplied."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE TARGET_INFO_SESSION_START_TIME (utcEpochNs INTEGER)")
+    c.execute("INSERT INTO TARGET_INFO_SESSION_START_TIME VALUES (999)")
+    conn.commit()
+    pid = get_profile_id(conn, fallback_path="/x.sqlite")
+    assert _SHA256_RE.match(pid), pid

@@ -768,6 +768,27 @@ class TestEvidenceReportEnvelope:
         assert d["title"] == "T"
         assert d["profile_path"] == "/p/x.sqlite"
         assert d["findings"] == []
+        # ``profile_id`` is additive — always present (empty default when
+        # not supplied), so consumers can rely on the key existing.
+        assert "profile_id" in d
+        assert d["profile_id"] == ""
+
+    def test_envelope_carries_profile_id(self):
+        """When set, profile_id is serialized verbatim in the envelope."""
+        report = EvidenceReport(title="T", profile_id="nsys1:sha256:abc", profile_path="/p")
+        d = report.to_dict()
+        assert d["profile_id"] == "nsys1:sha256:abc"
+
+    def test_from_dict_preserves_profile_id(self):
+        restored = EvidenceReport.from_dict(
+            {"title": "T", "profile_id": "nsys1:sha256:deadbeef", "profile_path": "/p"}
+        )
+        assert restored.profile_id == "nsys1:sha256:deadbeef"
+
+    def test_from_dict_defaults_profile_id_when_missing(self):
+        """Pre-profile_id payloads (no key) load with profile_id=''."""
+        restored = EvidenceReport.from_dict({"title": "T", "profile_path": "/p"})
+        assert restored.profile_id == ""
 
     def test_from_dict_accepts_v01_envelope(self):
         """Round-trip through to_dict / from_dict preserves the report."""
