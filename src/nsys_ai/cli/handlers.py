@@ -407,6 +407,42 @@ def _cmd_analyze(args, _profile):
             print(f"Markdown report written to {args.output}")
 
 
+def _write_evidence_report_or_die(report, out_path: str) -> None:
+    """Persist an ``EvidenceReport`` to disk via ``save_findings``.
+
+    Shared by ``analyze --format json`` and ``evidence build`` so the two
+    commands stay aligned on directory creation, error reporting, and the
+    "Saved N finding(s)" stderr line.
+    """
+    from nsys_ai.annotation import save_findings
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir and not os.path.exists(out_dir):
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            print(
+                f"Error: Failed to create output directory '{out_dir}': {e}",
+                file=sys.stderr,
+                flush=True,
+            )
+            sys.exit(1)
+    try:
+        save_findings(report, out_path)
+    except OSError as e:
+        print(
+            f"Error: Failed to write findings to '{out_path}': {e}",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+    print(
+        f"Saved {len(report.findings)} finding(s) → {out_path}",
+        flush=True,
+        file=sys.stderr,
+    )
+
+
 def _cmd_analyze_json(args, _profile):
     """Emit a v0.1 evidence findings report as JSON.
 
@@ -435,33 +471,7 @@ def _cmd_analyze_json(args, _profile):
 
         out = getattr(args, "output", None)
         if out:
-            from nsys_ai.annotation import save_findings
-
-            out_dir = os.path.dirname(out)
-            if out_dir and not os.path.exists(out_dir):
-                try:
-                    os.makedirs(out_dir, exist_ok=True)
-                except OSError as e:
-                    print(
-                        f"Error: Failed to create output directory '{out_dir}': {e}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    sys.exit(1)
-            try:
-                save_findings(report, out)
-            except OSError as e:
-                print(
-                    f"Error: Failed to write findings to '{out}': {e}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                sys.exit(1)
-            print(
-                f"Saved {len(report.findings)} finding(s) → {out}",
-                flush=True,
-                file=sys.stderr,
-            )
+            _write_evidence_report_or_die(report, out)
 
 
 def _cmd_report(args, _profile):
@@ -960,7 +970,6 @@ def _cmd_evidence(args, _profile):
         else:
             report = builder.build()
 
-        findings = [f.to_dict() for f in report.findings]
         # ``report.profile_path`` comes from the opened Profile (which
         # may resolve to a ``.sqlite`` sidecar for ``.nsys-rep`` inputs).
         # Leave it as-is so the envelope and the nested
@@ -972,7 +981,7 @@ def _cmd_evidence(args, _profile):
             print(json.dumps(payload, indent=2))
         else:
             sev_icons = {"critical": "🔴", "warning": "🟡", "info": "🔵"}
-            print(f"── Evidence Findings ({len(findings)}) ──")
+            print(f"── Evidence Findings ({len(report.findings)}) ──")
             for f in report.findings:
                 icon = sev_icons.get(f.severity, "⚪")
                 dur_ms = (f.end_ns - f.start_ns) / 1e6 if f.end_ns else 0
@@ -982,28 +991,7 @@ def _cmd_evidence(args, _profile):
 
         out = getattr(args, "output", None)
         if out:
-            from nsys_ai.annotation import save_findings
-
-            out_dir = os.path.dirname(out)
-            if out_dir and not os.path.exists(out_dir):
-                try:
-                    os.makedirs(out_dir, exist_ok=True)
-                except OSError as e:
-                    print(
-                        f"Error: Failed to create output directory '{out_dir}': {e}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    sys.exit(1)
-
-            try:
-                save_findings(report, out)
-            except OSError as e:
-                print(
-                    f"Error: Failed to write findings to '{out}': {e}", file=sys.stderr, flush=True
-                )
-                sys.exit(1)
-            print(f"Saved {len(findings)} finding(s) → {out}", flush=True, file=sys.stderr)
+            _write_evidence_report_or_die(report, out)
 
 
 def _apply_max_rows_truncation(rows: list, max_rows: int) -> list:
