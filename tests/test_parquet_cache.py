@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 
 from nsys_ai import parquet_cache
 
@@ -128,6 +129,79 @@ class TestBuildAndOpen:
         db = parquet_cache.open_cached_db(minimal_nsys_db_path)
         assert db is not None
         db.close()
+        assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True
+
+
+class TestConcurrentBuild:
+    """Regression: two terminals opening the same profile concurrently
+    must NOT both run the full ETL.
+
+    Before the build-lock landed, ``is_cache_valid()`` returned False
+    for every concurrent caller until the first finished its atomic
+    rename, so every caller ran its own ``_build_cache_into``. On a
+    296MB profile that meant ~10s of wasted ETL per duplicate runner.
+    """
+
+    def test_concurrent_threads_only_build_once(self, minimal_nsys_db_path, monkeypatch):
+        import threading
+        import time
+
+        # Start clean — make sure no prior test left a valid cache for
+        # this fixture (the cache lives next to the .sqlite file).
+        parquet_cache.invalidate_cache(minimal_nsys_db_path)
+        assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is False
+
+        num_threads = 4
+        # Barrier so every runner enters ``build_cache`` essentially
+        # simultaneously — without this, on lightly-loaded systems the
+        # first thread can finish before the others even start, hiding
+        # any locking bug.
+        barrier = threading.Barrier(num_threads)
+        call_count = 0
+        count_lock = threading.Lock()
+        original_build_into = parquet_cache._build_cache_into
+
+        def counting_build_into(sqlite_path: str, tmp_dir: Path) -> None:
+            nonlocal call_count
+            with count_lock:
+                call_count += 1
+            # Hold the lock long enough that all other threads are
+            # guaranteed to be queued on flock before this one releases.
+            # ETL on the minimal fixture is ~50ms; 0.5s sleep gives a
+            # ~10× safety margin.
+            time.sleep(0.5)
+            original_build_into(sqlite_path, tmp_dir)
+
+        monkeypatch.setattr(parquet_cache, "_build_cache_into", counting_build_into)
+
+        results: list[Path | BaseException] = []
+        results_lock = threading.Lock()
+
+        def runner() -> None:
+            try:
+                barrier.wait(timeout=10)
+                cache = parquet_cache.build_cache(str(minimal_nsys_db_path))
+            except BaseException as e:  # pragma: no cover - defensive
+                with results_lock:
+                    results.append(e)
+                return
+            with results_lock:
+                results.append(cache)
+
+        threads = [threading.Thread(target=runner) for _ in range(num_threads)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert len(results) == num_threads, "all threads must complete"
+        assert call_count == 1, (
+            f"_build_cache_into should run exactly once for {num_threads} "
+            f"concurrent callers; got {call_count}"
+        )
+        # Every caller returns the same cache directory.
+        cache_dirs = {r for r in results if isinstance(r, Path)}
+        assert len(cache_dirs) == 1, f"all callers must agree on cache_dir; got {cache_dirs}"
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True
 
 
