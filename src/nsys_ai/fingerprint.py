@@ -170,7 +170,20 @@ def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str
     never materialised. Callers should pass ``self.prof.conn`` (the
     SQLite source where available); the function never reads
     ``self.prof.db`` semantics — it just runs SQL.
+
+    ``fallback_path`` is hashed verbatim — pass an absolute path if you
+    want it to compare equal across working-directory changes.
     """
+    # None-safe shortcut: wrap_connection(None) returns a SQLiteAdapter
+    # over None, whose .execute() raises AttributeError (not a DB error),
+    # so the loop's try/except wouldn't catch it. Skip the queries.
+    if conn is None:
+        if fallback_path:
+            digest = hashlib.sha256(fallback_path.encode("utf-8")).hexdigest()
+            return f"{PROFILE_ID_VERSION}:path:{digest}"
+        empty = hashlib.sha256(b"").hexdigest()
+        return f"{PROFILE_ID_VERSION}:sha256:{empty}"
+
     adapter = wrap_connection(conn)
     parts: list[tuple[str, str]] = []
 
@@ -194,22 +207,34 @@ def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str
     parts.append(
         (
             "trace_range",
+            # ANALYSIS_DETAILS is conventionally single-row, but pin the
+            # ordering anyway so a multi-row session is deterministic.
             _one(
-                "SELECT duration || '|' || startTime || '|' || stopTime FROM ANALYSIS_DETAILS"
+                "SELECT duration || '|' || startTime || '|' || stopTime "
+                "FROM ANALYSIS_DETAILS ORDER BY startTime, stopTime LIMIT 1"
             ),
         )
     )
     parts.append(
         (
             "gpus",
+            # NULLS LAST: SQLite defaults to NULLS FIRST, DuckDB to
+            # NULLS LAST — pin it so two engine adapters on the same data
+            # hash identically.
             _all(
                 "SELECT id || '|' || name || '|' || COALESCE(uuid, '') "
-                "FROM TARGET_INFO_GPU ORDER BY id"
+                "FROM TARGET_INFO_GPU ORDER BY id NULLS LAST"
             ),
         )
     )
     parts.append(
-        ("pids", _all("SELECT DISTINCT globalPid FROM ANALYSIS_FILE ORDER BY globalPid"))
+        (
+            "pids",
+            _all(
+                "SELECT DISTINCT globalPid FROM ANALYSIS_FILE "
+                "ORDER BY globalPid NULLS LAST"
+            ),
+        )
     )
     parts.append(("kernel_count", _one("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL")))
 

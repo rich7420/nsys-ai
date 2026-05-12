@@ -273,19 +273,22 @@ class TestEvidenceBuilderIntegration:
             builder = EvidenceBuilder(prof, device=0)
             report = builder.build(only=["idle_gaps"])
 
+        # The envelope must always be stamped with a content-derived id,
+        # regardless of whether the fixture happened to produce findings.
+        assert report.profile_id.startswith("nsys1:"), report.profile_id
+        assert report.profile_id != str(minimal_nsys_db_path), (
+            "profile_id must be a hash, not the filesystem path"
+        )
+
         # The envelope and every nested selection share one profile_id;
         # the minimal fixture may or may not produce idle-gap findings on
-        # any given run, so we only assert when at least one exists.
+        # any given run, so we only check the per-finding contract when
+        # at least one finding exists.
         idle = [f for f in report.findings if f.category == "idle"]
-        if idle:
-            assert report.profile_id.startswith("nsys1:"), report.profile_id
-            assert report.profile_id != str(minimal_nsys_db_path), (
-                "profile_id must be a hash, not the filesystem path"
-            )
-            for f in idle:
-                assert f.selection is not None
-                assert f.selection.profile_id == report.profile_id
-                assert f.selection.source == "skill:gpu_idle_gaps"
+        for f in idle:
+            assert f.selection is not None
+            assert f.selection.profile_id == report.profile_id
+            assert f.selection.source == "skill:gpu_idle_gaps"
 
     def test_builder_still_works_with_legacy_single_arg_skills(self, minimal_nsys_db_path):
         """Skills whose to_findings_fn is the legacy (rows) single-arg form
