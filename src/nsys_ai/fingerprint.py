@@ -8,6 +8,7 @@ artefacts (envelope and ``TraceSelection``).
 """
 
 import hashlib
+import json
 import typing
 from dataclasses import dataclass, field
 
@@ -155,10 +156,18 @@ def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str
     ``journal_mode`` changes, and filesystem moves:
 
       - ``TARGET_INFO_SESSION_START_TIME.utcEpochNs``
-      - ``ANALYSIS_DETAILS`` ``duration / startTime / stopTime``
-      - ``TARGET_INFO_GPU`` rows (``id``, ``name``, hardware ``uuid``)
+      - ``ANALYSIS_DETAILS`` rows (``duration / startTime / stopTime``)
+      - ``TARGET_INFO_GPU`` rows (``id``, ``name``)
+      - ``TARGET_INFO_GPU.uuid`` values when the column exists
+        (newer Nsight); older exports keep ``uuid`` on
+        ``TARGET_INFO_CUDA_DEVICE`` and that contribution degrades to
+        empty rather than failing
       - distinct ``ANALYSIS_FILE.globalPid`` values
       - ``CUPTI_ACTIVITY_KIND_KERNEL`` row count
+
+    Each contribution is JSON-encoded as a ``(label, value)`` pair before
+    hashing, so values containing ``|`` / ``;`` / ``\\n`` can never collide
+    with neighbouring values via separator ambiguity.
 
     Format::
 
@@ -173,6 +182,19 @@ def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str
 
     ``fallback_path`` is hashed verbatim — pass an absolute path if you
     want it to compare equal across working-directory changes.
+
+    .. note::
+       When *both* ``conn`` is None / empty and ``fallback_path`` is
+       None, the function returns ``nsys1:sha256:<sha256 of empty>``.
+       That is a recognisable null-id sentinel: every such caller
+       collapses to the same value. Always pass ``fallback_path`` if
+       cross-call distinguishability matters.
+
+    .. note::
+       ``NULLS LAST`` requires SQLite ≥ 3.30 (2019-10-04) and is native
+       in DuckDB. Older SQLite raises ``OperationalError`` on the
+       ``ORDER BY ... NULLS LAST`` clause; the offending contribution
+       is caught and degraded to empty rather than crashing.
     """
     # None-safe shortcut: wrap_connection(None) returns a SQLiteAdapter
     # over None, whose .execute() raises AttributeError (not a DB error),
@@ -185,67 +207,81 @@ def get_profile_id(conn: typing.Any, *, fallback_path: str | None = None) -> str
         return f"{PROFILE_ID_VERSION}:sha256:{empty}"
 
     adapter = wrap_connection(conn)
-    parts: list[tuple[str, str]] = []
 
-    def _one(sql: str) -> str:
+    def _scalar(sql: str) -> typing.Any:
+        """Return the single cell from a one-row/one-column query, or None."""
         try:
             row = adapter.execute(sql).fetchone()
-            return str(row[0]) if row and row[0] is not None else ""
+            return row[0] if row and row[0] is not None else None
         except DB_ERRORS:
-            return ""
+            return None
 
-    def _all(sql: str) -> str:
+    def _rows(sql: str) -> list[list[typing.Any]]:
+        """Return all rows as a list of lists (JSON-serialisable)."""
         try:
-            rows = adapter.execute(sql).fetchall()
-            return ";".join(str(r[0]) for r in rows if r and r[0] is not None)
+            return [list(r) for r in adapter.execute(sql).fetchall() if r]
         except DB_ERRORS:
-            return ""
+            return []
 
-    parts.append(
-        ("session_start_utc_ns", _one("SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME"))
-    )
-    parts.append(
+    # NULLS LAST: SQLite defaults to NULLS FIRST, DuckDB to NULLS LAST —
+    # pin it so two engine adapters on the same data hash identically.
+    parts: list[tuple[str, typing.Any]] = [
+        ("session_start_utc_ns", _scalar("SELECT utcEpochNs FROM TARGET_INFO_SESSION_START_TIME")),
+        # ANALYSIS_DETAILS is conventionally single-row, but serialise all
+        # rows in deterministic order so the contribution stays stable
+        # if a future profile carries more than one row.
         (
-            "trace_range",
-            # ANALYSIS_DETAILS is conventionally single-row, but pin the
-            # ordering anyway so a multi-row session is deterministic.
-            _one(
-                "SELECT duration || '|' || startTime || '|' || stopTime "
-                "FROM ANALYSIS_DETAILS ORDER BY startTime, stopTime LIMIT 1"
+            "analysis_details",
+            _rows(
+                "SELECT duration, startTime, stopTime FROM ANALYSIS_DETAILS "
+                "ORDER BY startTime, stopTime"
             ),
-        )
-    )
-    parts.append(
+        ),
+        # GPU id + name works on every Nsight schema we've seen.
         (
             "gpus",
-            # NULLS LAST: SQLite defaults to NULLS FIRST, DuckDB to
-            # NULLS LAST — pin it so two engine adapters on the same data
-            # hash identically.
-            _all(
-                "SELECT id || '|' || name || '|' || COALESCE(uuid, '') "
-                "FROM TARGET_INFO_GPU ORDER BY id NULLS LAST"
+            _rows("SELECT id, name FROM TARGET_INFO_GPU ORDER BY id NULLS LAST"),
+        ),
+        # uuid lives on TARGET_INFO_GPU in newer Nsight exports and on
+        # TARGET_INFO_CUDA_DEVICE in older ones (and in our minimal test
+        # fixture). Query each in its own contribution so a schema
+        # mismatch degrades only that part, not the whole id.
+        (
+            "gpu_uuids",
+            _rows("SELECT uuid FROM TARGET_INFO_GPU ORDER BY id NULLS LAST"),
+        ),
+        (
+            "cuda_device_uuids",
+            _rows(
+                "SELECT uuid FROM TARGET_INFO_CUDA_DEVICE "
+                "ORDER BY gpuId NULLS LAST, cudaId NULLS LAST"
             ),
-        )
-    )
-    parts.append(
+        ),
         (
             "pids",
-            _all(
+            _rows(
                 "SELECT DISTINCT globalPid FROM ANALYSIS_FILE "
                 "ORDER BY globalPid NULLS LAST"
             ),
-        )
-    )
-    parts.append(("kernel_count", _one("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL")))
+        ),
+        ("kernel_count", _scalar("SELECT COUNT(*) FROM CUPTI_ACTIVITY_KIND_KERNEL")),
+    ]
 
-    canonical = "\n".join(f"{k}={v}" for k, v in parts)
+    # If every contribution is missing/empty the conn carries no Nsight
+    # metadata (e.g. parquetdir backend). Fall back to a clearly-labelled
+    # path-derived id rather than collapse every such profile to the
+    # same constant hash.
+    def _empty(v: typing.Any) -> bool:
+        return v is None or v == "" or v == [] or v == 0
 
-    # If every contribution is empty the conn carries no Nsight metadata
-    # (e.g. parquetdir backend). Fall back to a clearly-labelled
-    # path-derived id rather than collapse every such profile to the same
-    # constant hash.
-    if not any(v for _, v in parts) and fallback_path:
+    if all(_empty(v) for _, v in parts) and fallback_path:
         digest = hashlib.sha256(fallback_path.encode("utf-8")).hexdigest()
         return f"{PROFILE_ID_VERSION}:path:{digest}"
+
+    # JSON canonical: structured, unambiguous, no separator collisions.
+    # ``sort_keys=False`` because ``parts`` is already ordered; flipping
+    # the order would change the hash, which is intended (algorithm
+    # change → bump PROFILE_ID_VERSION).
+    canonical = json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return f"{PROFILE_ID_VERSION}:sha256:{digest}"

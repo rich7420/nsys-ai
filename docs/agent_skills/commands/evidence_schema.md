@@ -15,7 +15,6 @@ This minimal form is what existed before v0.1 and still loads identically today 
 cat > /tmp/findings.json << 'EOF'
 {
   "title": "Pipeline Parallelism Bubble Analysis",
-  "profile_id": "nsys1:sha256:7d2f6013fb98855bda6a5448a91af563553cc2c013f42ca6d9cdbb3b737ac738",
   "profile_path": "fastvideo.sqlite",
   "findings": [
     {

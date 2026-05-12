@@ -189,3 +189,74 @@ def test_get_profile_id_partial_metadata_still_content_path():
     conn.commit()
     pid = get_profile_id(conn, fallback_path="/x.sqlite")
     assert _SHA256_RE.match(pid), pid
+
+
+def test_get_profile_id_none_conn_with_fallback():
+    """``conn=None`` short-circuits to the path-derived fallback."""
+    pid = get_profile_id(None, fallback_path="/some/profile.sqlite")
+    assert _PATH_RE.match(pid), pid
+
+
+def test_get_profile_id_none_conn_without_fallback_is_null_sentinel():
+    """``conn=None`` and no fallback yields the recognisable empty-sha256
+    sentinel — every such caller collapses to the same value, which is
+    intentional (it's a null-id marker, not a usable identifier)."""
+    pid = get_profile_id(None)
+    assert _SHA256_RE.match(pid), pid
+    # The well-known SHA-256 of the empty string. If this constant ever
+    # changes, hashlib has changed, not our algorithm.
+    empty_sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    assert pid == f"nsys1:sha256:{empty_sha}"
+
+
+def test_get_profile_id_no_separator_collision():
+    """Regression for Copilot review: previous canonical built strings by
+    concatenating values with ``|`` / ``;`` separators, so a GPU named
+    ``"A|B"`` could collide with two distinct fields ``("A", "B")`` etc.
+    JSON canonical eliminates this entirely."""
+    # Two profiles differing only in *where* the ``|`` lives.
+    a = _nsight_meta_db(gpus=[(0, "A|B", "uuid")])
+    b = _nsight_meta_db(gpus=[(0, "A", "B|uuid")])
+    assert get_profile_id(a) != get_profile_id(b)
+
+
+def test_get_profile_id_handles_missing_gpu_uuid_column():
+    """The repo's own minimal fixture stores ``uuid`` on
+    ``TARGET_INFO_CUDA_DEVICE``, not ``TARGET_INFO_GPU``. The ``gpu_uuids``
+    contribution must fail gracefully on such schemas without aborting
+    the whole id computation."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    # Older-style schema: TARGET_INFO_GPU has no uuid column.
+    c.execute(
+        "CREATE TABLE TARGET_INFO_GPU "
+        "(id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT)"
+    )
+    c.execute("INSERT INTO TARGET_INFO_GPU VALUES (0, 'NVIDIA H100', '0000:91:00.0')")
+    # uuid lives here in this schema:
+    c.execute(
+        "CREATE TABLE TARGET_INFO_CUDA_DEVICE "
+        "(gpuId INTEGER, cudaId INTEGER, pid INTEGER, uuid TEXT)"
+    )
+    c.execute("INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, 'older-style-uuid')")
+    conn.commit()
+
+    pid = get_profile_id(conn, fallback_path="/x.sqlite")
+    assert _SHA256_RE.match(pid), pid
+    # Sanity: a profile with the *same* GPU id+name but a *different*
+    # cuda_device uuid must hash differently — the contribution must
+    # actually be reaching the canonical bytes.
+    other = sqlite3.connect(":memory:")
+    oc = other.cursor()
+    oc.execute(
+        "CREATE TABLE TARGET_INFO_GPU "
+        "(id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT)"
+    )
+    oc.execute("INSERT INTO TARGET_INFO_GPU VALUES (0, 'NVIDIA H100', '0000:91:00.0')")
+    oc.execute(
+        "CREATE TABLE TARGET_INFO_CUDA_DEVICE "
+        "(gpuId INTEGER, cudaId INTEGER, pid INTEGER, uuid TEXT)"
+    )
+    oc.execute("INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, 'different-uuid')")
+    other.commit()
+    assert get_profile_id(other, fallback_path="/x.sqlite") != pid
