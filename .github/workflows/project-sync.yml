@@ -3,8 +3,6 @@ name: Sync Issues to Project Board
 on:
   issues:
     types: [labeled, unlabeled, closed, reopened]
-  pull_request:
-    types: [closed]
 
 env:
   PROJECT_NUM: 5
@@ -94,16 +92,3 @@ jobs:
             });
 
             console.log(`Moved issue #${issue.number} → ${targetStatus}`);
-
-      - name: Auto-close issue on PR merge
-        if: github.event.pull_request.merged == true
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.PROJECT_TOKEN }}
-          script: |
-            const body = context.payload.pull_request.body || '';
-            const matches = body.match(/[Cc]loses?\s+#(\d+)/g) || [];
-            for (const match of matches) {
-              const num = parseInt(match.match(/\d+/)[0]);
-              console.log(`PR merged — issue #${num} will be closed by GitHub automatically`);
-            }
