@@ -278,9 +278,51 @@ def _format(rows):
     return "\n".join(lines)
 
 
-def _to_findings(rows: list[dict]) -> list:
-    from nsys_ai.annotation import Finding
+# Text reused across every idle-gap finding — kept module-level so the
+# strings are not re-allocated per row.
+_EXPLANATION = (
+    "GPU streams idle when no kernel is running on them. Large gaps "
+    "(>1ms) typically mean the GPU is waiting on the CPU (dataloader "
+    "blocking, explicit synchronization) or on PCIe transfers."
+)
+_SUGGESTED_ACTIONS = [
+    "Check for explicit cudaDeviceSynchronize / torch.cuda.synchronize calls in the call chain",
+    "Verify the dataloader is keeping up (num_workers, pin_memory, prefetch_factor)",
+    "Consider CUDA graphs if many tiny kernels precede the gap",
+    "Check whether host-to-device transfers can be overlapped with compute",
+]
+_FALSE_POSITIVE_NOTES = [
+    "Gaps <1ms are usually normal kernel launch overhead, not real stalls",
+    "Profiler overhead can inflate apparent idle time on very short profiles",
+]
 
+
+def _gap_confidence(gap_ms: float) -> float:
+    """Map a gap duration to a confidence in [0, 1].
+
+    Small gaps near the kernel-launch-overhead floor are less likely to
+    be real stalls; large gaps are almost certainly real.
+    """
+    if gap_ms < 1:
+        return 0.4
+    if gap_ms < 10:
+        return 0.7
+    if gap_ms < 100:
+        return 0.85
+    return 0.95
+
+
+def _to_findings(rows: list[dict], *, context: dict | None = None) -> list:
+    """Build v0.1 ``Finding`` objects for each idle-gap row.
+
+    Accepts an optional ``context`` mapping carrying profile-level
+    metadata (``profile_id``); when absent the selections fall back to
+    a placeholder string so the function remains usable when called
+    directly (e.g. in tests).
+    """
+    from nsys_ai.annotation import EvidenceRow, Finding, TraceSelection
+
+    profile_id = (context or {}).get("profile_id", "unknown")
     findings = []
 
     for r in rows:
@@ -299,6 +341,36 @@ def _to_findings(rows: list[dict]) -> list:
                 and profile_end_ns is not None
                 and profile_end_ns > profile_start_ns
             ):
+                total_idle_ms = r.get("total_idle_ms", 0)
+                gap_count = r.get("gap_count", 0)
+                finding_id = f"idle_summary_gpu{target_device}"
+
+                selection = TraceSelection(
+                    id=f"sel_{finding_id}",
+                    profile_id=profile_id,
+                    source="skill:gpu_idle_gaps",
+                    start_ns=profile_start_ns,
+                    end_ns=profile_end_ns,
+                    gpu_ids=[target_device],
+                    label=f"GPU {target_device} idle window",
+                )
+                evidence_row = EvidenceRow(
+                    id=f"ev_{finding_id}",
+                    source_skill="gpu_idle_gaps",
+                    values={
+                        "total_idle_ms": total_idle_ms,
+                        "gap_count": gap_count,
+                        "pct_of_profile": pct,
+                    },
+                    units={
+                        "total_idle_ms": "ms",
+                        "gap_count": "count",
+                        "pct_of_profile": "percent",
+                    },
+                    selection_id=selection.id,
+                    provenance={"row_kind": "summary", "device": target_device},
+                )
+
                 findings.append(
                     Finding(
                         type="region",
@@ -308,31 +380,95 @@ def _to_findings(rows: list[dict]) -> list:
                         gpu_id=target_device,
                         severity="info" if pct < 15 else "warning",
                         note=(
-                            f"Total: {r.get('total_idle_ms', 0):.1f}ms idle across "
-                            f"{r.get('gap_count', 0)} gaps ({pct}% of profiled span)"
+                            f"Total: {total_idle_ms:.1f}ms idle across "
+                            f"{gap_count} gaps ({pct}% of profiled span)"
                         ),
+                        # v0.1 fields
+                        id=finding_id,
+                        category="idle",
+                        confidence=min(0.95, 0.4 + pct / 100),
+                        evidence=[evidence_row],
+                        selection=selection,
+                        explanation=_EXPLANATION,
+                        suggested_actions=list(_SUGGESTED_ACTIONS),
+                        false_positive_notes=list(_FALSE_POSITIVE_NOTES),
+                        provenance={"skill": "gpu_idle_gaps", "row_kind": "summary"},
                     )
                 )
             continue
 
-        gap_ms = r["gap_ns"] / 1e6
-        note = f"Stream {r['streamId']}: {gap_ms:.2f}ms idle"
+        # Per-gap finding
+        gap_ns = r["gap_ns"]
+        gap_ms = gap_ns / 1e6
+        start_ns = r["start_ns"]
+        end_ns = r["end_ns"]
+        device_id = r.get("deviceId", 0)
+        stream_id = r["streamId"]
+
+        note = f"Stream {stream_id}: {gap_ms:.2f}ms idle"
+        cpu_api_name: str | None = None
+        cpu_api_ms: float | None = None
         attr = r.get("attribution", {})
         if attr and attr.get("top_apis"):
             api = attr["top_apis"][0]
-            api_name = api["name"].split("_v")[0]
-            note += f" — CPU: {api_name} ({api['total_ms']:.1f}ms)"
+            cpu_api_name = api["name"].split("_v")[0]
+            cpu_api_ms = api.get("total_ms")
+            note += f" — CPU: {cpu_api_name} ({cpu_api_ms:.1f}ms)"
+
+        finding_id = f"idle_gap_gpu{device_id}_stream{stream_id}_{start_ns}"
+
+        selection = TraceSelection(
+            id=f"sel_{finding_id}",
+            profile_id=profile_id,
+            source="skill:gpu_idle_gaps",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            gpu_ids=[device_id],
+            stream_ids=[stream_id],
+            label=f"{gap_ms:.2f}ms idle gap",
+        )
+
+        ev_values: dict = {"gap_ms": round(gap_ms, 3), "gap_ns": gap_ns}
+        ev_units: dict[str, str] = {"gap_ms": "ms", "gap_ns": "ns"}
+        if cpu_api_name is not None:
+            ev_values["top_cpu_api"] = cpu_api_name
+            if cpu_api_ms is not None:
+                ev_values["top_cpu_api_ms"] = round(cpu_api_ms, 3)
+                ev_units["top_cpu_api_ms"] = "ms"
+
+        evidence_row = EvidenceRow(
+            id=f"ev_{finding_id}",
+            source_skill="gpu_idle_gaps",
+            values=ev_values,
+            units=ev_units,
+            selection_id=selection.id,
+            provenance={
+                "row_kind": "per_gap",
+                "device": device_id,
+                "stream": stream_id,
+            },
+        )
 
         findings.append(
             Finding(
                 type="region",
                 label=f"GPU Idle Gap ({gap_ms:.2f}ms)",
-                start_ns=r["start_ns"],
-                end_ns=r["end_ns"],
-                gpu_id=r.get("deviceId", 0),
-                stream=str(r["streamId"]),
+                start_ns=start_ns,
+                end_ns=end_ns,
+                gpu_id=device_id,
+                stream=str(stream_id),
                 severity="warning",
                 note=note,
+                # v0.1 fields
+                id=finding_id,
+                category="idle",
+                confidence=_gap_confidence(gap_ms),
+                evidence=[evidence_row],
+                selection=selection,
+                explanation=_EXPLANATION,
+                suggested_actions=list(_SUGGESTED_ACTIONS),
+                false_positive_notes=list(_FALSE_POSITIVE_NOTES),
+                provenance={"skill": "gpu_idle_gaps", "row_kind": "per_gap"},
             )
         )
     return findings

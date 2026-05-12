@@ -5,12 +5,40 @@ Each method queries individual kernel instances (not aggregates)
 to produce findings with exact nanosecond timestamps for timeline overlay.
 """
 
+import inspect
 import logging
+from collections.abc import Callable
 
 from .annotation import EvidenceReport, Finding
 from .profile import Profile
 
 _log = logging.getLogger(__name__)
+
+
+def _invoke_to_findings(fn: Callable, rows: list[dict], context: dict) -> list[Finding]:
+    """Call ``Skill.to_findings_fn`` with optional v0.1 context.
+
+    Skills upgraded to the v0.1 schema declare a ``context`` keyword
+    parameter (or accept ``**kwargs``) to receive the profile-level
+    metadata (``profile_id``, etc.) needed to construct
+    ``TraceSelection`` / ``EvidenceRow`` objects.
+
+    Legacy skills with the single-argument signature ``(rows)`` are
+    invoked unchanged for backward compatibility.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        # Builtins / C extensions may not expose a signature; fall back
+        # to the legacy single-argument calling convention.
+        return fn(rows)
+
+    accepts_context = "context" in sig.parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if accepts_context:
+        return fn(rows, context=context)
+    return fn(rows)
 
 
 class EvidenceBuilder:
@@ -57,6 +85,11 @@ class EvidenceBuilder:
         from .skills.registry import get_skill
 
         findings: list[Finding] = []
+        # v0.1 context handed to upgraded skills' to_findings_fn for
+        # constructing TraceSelection / EvidenceRow with provenance.
+        # profile_id is sourced from the profile's filesystem path until
+        # a stable content fingerprint is wired through.
+        context: dict = {"profile_id": str(getattr(self.prof, "path", ""))}
         for analyzer_name, (skill_name, params) in self._SKILL_PIPELINE.items():
             if only is not None and analyzer_name not in only:
                 continue
@@ -79,7 +112,7 @@ class EvidenceBuilder:
                 conn = self.prof.db if self.prof.db is not None else self.prof.conn
                 rows = skill.execute(conn, **kwargs)
                 if skill.to_findings_fn:
-                    findings.extend(skill.to_findings_fn(rows))
+                    findings.extend(_invoke_to_findings(skill.to_findings_fn, rows, context))
             except Exception as e:
                 _log.error(
                     "Analyzer %s (skill %s) failed: %s", analyzer_name, skill_name, e, exc_info=True
