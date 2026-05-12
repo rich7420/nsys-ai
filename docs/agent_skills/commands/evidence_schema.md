@@ -2,9 +2,13 @@
 
 **Purpose**: When an AI agent reaches a conclusion about a profile, it should produce a `findings.json` file that highlights the supporting timeline ranges for human verification.
 
+**Schema version**: `0.1`. Older payloads (pre-`schema_version`, only the legacy display fields on `Finding`) still load unchanged — every new field is optional.
+
 ---
 
-## Quick Example
+## Quick Example (minimal — legacy fields only)
+
+This minimal form is what existed before v0.1 and still loads identically today — no envelope, no v0.1 optional fields.
 
 ```bash
 # Agent writes findings based on its analysis
@@ -38,9 +42,13 @@ EOF
 nsys-ai timeline-web fastvideo.sqlite --findings /tmp/findings.json
 ```
 
+> The v0.1 envelope keys (`schema_version` / `producer` / `producer_version`) and Finding optional fields (`category`, `confidence`, `evidence`, `selection`, etc.) are documented in the sections below. Use them when you want category / confidence, structured evidence, or selection-based navigation — see [Enriched (v0.1) Example](#enriched-v01-example).
+
 ---
 
 ## Finding Fields
+
+Required fields and pre-v0.1 display fields (rendered by every consumer):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -52,7 +60,24 @@ nsys-ai timeline-web fastvideo.sqlite --findings /tmp/findings.json
 | `stream` | string | optional | CUDA stream ID for highlighting a specific stream |
 | `severity` | string | optional | `"critical"` (red), `"warning"` (orange), `"info"` (blue). Default: `"info"` |
 | `note` | string | optional | Longer explanation shown on hover / in sidebar detail |
-| `color` | string | optional | Override color, e.g. `"rgba(255,68,68,0.3)"`. Default by severity |
+| `color` | string | optional | Reserved for a future per-finding color override. The timeline-web viewer today derives overlay color exclusively from `severity` and ignores this field; setting it has no visible effect yet. |
+
+### v0.1 optional fields
+
+All new fields default to `null` (or are omitted entirely) and are dropped from `to_dict()` output when unset, so legacy producers keep emitting the compact pre-v0.1 shape:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Stable identifier for this finding (e.g. `"idle_gap_gpu0_stream7_500"`). Used by tooling for cross-references and provenance. |
+| `category` | string | Step-time bucket: `"compute"`, `"communication"`, `"launch_overhead"`, `"idle"`. Orthogonal tags also accepted: `"memory"`, `"sync"`, `"nvtx"`, `"profile_quality"`, `"kernel_internal"`, `"framework"`. |
+| `confidence` | float | Producer's confidence in [0.0, 1.0]. Low values flag noisy / borderline findings; high values flag clear bottlenecks. |
+| `evidence` | list[EvidenceRow] | Structured rows backing the finding — metric values, units, provenance. See [EvidenceRow](#evidencerow). |
+| `selection` | TraceSelection | The region of the profile the finding refers to (time + GPU + stream + NVTX path). See [TraceSelection](#traceselection). |
+| `explanation` | string | Longer-form prose for a human reader. Free of profile-specific numbers; the `evidence` rows carry the numbers. |
+| `suggested_actions` | list[string] | Concrete next steps the user could take (e.g. `"Check for explicit cudaDeviceSynchronize calls"`). |
+| `false_positive_notes` | list[string] | Known caveats / when this finding may not be a real bottleneck. |
+| `provenance` | dict | Producer metadata (skill name, row kind, etc.). Free-form. |
+| `diff_lineage` | DiffLineage | When a finding came from a diff comparison, identifies which diff and the finding's role. See [DiffLineage](#difflineage). |
 
 ## Good vs Bad Findings
 
@@ -79,15 +104,184 @@ Findings should encode **conclusions**, not raw data. The agent must reason abou
 
 ```json
 {
+  "schema_version": "0.1",
+  "producer": "nsys-ai",
+  "producer_version": "0.2.2",
   "title": "Human-readable title for the report",
   "profile_path": "path/to/profile.sqlite",
   "findings": [ ... ]
 }
 ```
 
-- `title`: Displayed at the top of the evidence sidebar
-- `profile_path`: Optional, for reference only
-- `findings`: Array of Finding objects (see above)
+- `schema_version`: Current evidence-artifact schema version (`"0.1"`). Bumped on breaking changes; additive new optional fields do not bump it.
+- `producer`: Always `"nsys-ai"` for reports emitted by this tool.
+- `producer_version`: Version of the `nsys-ai` package that wrote the report.
+- `title`: Displayed at the top of the evidence sidebar.
+- `profile_path`: Optional, for reference only.
+- `findings`: Array of Finding objects (see above).
+
+Legacy payloads without the envelope keys (`schema_version` / `producer` / `producer_version`) load identically — readers ignore unknown / missing envelope fields.
+
+---
+
+## Supporting Types
+
+### EvidenceRow
+
+One row of measured evidence backing a Finding. A skill emits zero or more rows; an evidence-citing Finding embeds them directly under `Finding.evidence`. Each row may additionally carry a `selection_id` that cross-references a `TraceSelection` (see below). There is no Finding→EvidenceRow id reference field — Findings always embed their evidence inline.
+
+```json
+{
+  "id": "ev_idle_gap_gpu0_stream7_500",
+  "source_skill": "gpu_idle_gaps",
+  "values": {
+    "gap_ms": 12.5,
+    "gap_ns": 12500000,
+    "top_cpu_api": "cudaLaunchKernel",
+    "top_cpu_api_ms": 11.2
+  },
+  "units": {
+    "gap_ms": "ms",
+    "gap_ns": "ns",
+    "top_cpu_api_ms": "ms"
+  },
+  "selection_id": "sel_idle_gap_gpu0_stream7_500",
+  "provenance": {
+    "row_kind": "per_gap",
+    "device": 0,
+    "stream": 7
+  }
+}
+```
+
+- `id`: Stable id for this row.
+- `source_skill`: Name of the skill that produced this row.
+- `values`: Raw metric values (free-form dict). Numeric values should be machine-readable (no formatting suffixes).
+- `units`: Maps each value key to its unit string (e.g. `"ms"`, `"ns"`, `"count"`, `"percent"`).
+- `selection_id`: Optional cross-reference to the `TraceSelection` this row applies to.
+- `provenance`: Free-form producer metadata.
+
+### TraceSelection
+
+A region of a profile. All location fields are optional — a selection may be time-only, GPU-only, NVTX-only, or any combination.
+
+```json
+{
+  "id": "sel_idle_gap_gpu0_stream7_500",
+  "profile_id": "/path/to/profile.sqlite",
+  "source": "skill:gpu_idle_gaps",
+  "start_ns": 500,
+  "end_ns": 12500500,
+  "gpu_ids": [0],
+  "stream_ids": [7],
+  "nvtx_path": ["iteration_142", "backward"],
+  "label": "12.50ms idle gap"
+}
+```
+
+- `id`: Stable id for this selection.
+- `profile_id`: Opaque profile identifier — any string the producer picks, treated by readers as an equality key. Two surfaces looking at the same profile should agree on the value. Built-in skills today use the profile's filesystem path; future producers may use a content-hash fingerprint.
+- `source`: Who produced the selection — `"skill:<name>"`, `"gui"`, `"user"`, or `"diff"`.
+- `start_ns` / `end_ns`: Time window (nanoseconds, absolute from profile epoch).
+- `gpu_ids` / `rank_ids` / `stream_ids`: Location lists. Empty list (`[]`) means "no GPUs/ranks/streams" — distinct from omission, which means "unspecified".
+- `nvtx_path`: NVTX hierarchy from root to leaf, e.g. `["iteration_142", "backward"]`.
+- `event_ids`: Specific event ids when known.
+- `label`: Short human-readable summary.
+
+### DiffLineage
+
+Set on findings that originated from a before/after diff comparison.
+
+```json
+{
+  "diff_id": "diff_20260512",
+  "role": "regression",
+  "rank": 1,
+  "baseline_profile_id": "/path/to/baseline.sqlite"
+}
+```
+
+- `diff_id`: Id of the diff run this finding came from.
+- `role`: `"regression"`, `"improvement"`, or `"stable"`.
+- `rank`: 0-indexed position in the diff's top-regressions / top-improvements list.
+- `baseline_profile_id`: Identifier of the baseline side of the diff.
+
+### Diagnostic
+
+A higher-level summary an agent emits after analyzing a profile or a diff. Pairs a runnable verification command with the findings that justify the diagnosis.
+
+```json
+{
+  "id": "diag_20260512_idle",
+  "summary": "Backward pass is exposed-NCCL bound on rank 5.",
+  "recommendation": "Inspect DDP bucket timing and overlap settings.",
+  "verification_command": "nsys-ai diff before.sqlite after.sqlite --axis communication --axis step",
+  "confidence": 0.86,
+  "primary_findings": [ ... Finding objects ... ],
+  "root_cause_hypotheses": [
+    "DDP bucket boundary serializes the AllReduce after the last bucket's backward"
+  ]
+}
+```
+
+- `verification_command` is a **runnable** `nsys-ai` command, not a description. If no runnable command can be constructed, an agent should say so explicitly rather than narrate one here.
+
+> **Transport note**: at v0.1, `Diagnostic` is a standalone schema type. It is **not** carried inside `EvidenceReport` / `findings.json` — that wrapper only knows about `findings`. A producer emitting a diagnosis should serialize it to its own JSON document (e.g. `diagnostic.json`). Top-level `diagnostic` / `diagnostics` keys added to a `findings.json` payload will be silently dropped by `EvidenceReport.from_dict()`.
+
+---
+
+## Enriched (v0.1) Example
+
+Same finding as the [Quick Example](#quick-example-minimal--legacy-fields-only) above, written with the v0.1 fields populated:
+
+```json
+{
+  "schema_version": "0.1",
+  "producer": "nsys-ai",
+  "producer_version": "0.2.2",
+  "title": "Pipeline Parallelism Bubble Analysis",
+  "profile_path": "fastvideo.sqlite",
+  "findings": [
+    {
+      "id": "pp_bubble_iter142",
+      "type": "region",
+      "label": "PP Bubble — 21s GPU idle",
+      "start_ns": 89000000000,
+      "end_ns": 110000000000,
+      "gpu_id": 0,
+      "severity": "critical",
+      "note": "Largest idle gap between micro-batches",
+      "category": "idle",
+      "confidence": 0.92,
+      "evidence": [
+        {
+          "id": "ev_pp_bubble_iter142",
+          "source_skill": "gpu_idle_gaps",
+          "values": {"gap_ms": 21000.0, "pct_of_profile": 24.5},
+          "units": {"gap_ms": "ms", "pct_of_profile": "percent"}
+        }
+      ],
+      "selection": {
+        "id": "sel_pp_bubble_iter142",
+        "profile_id": "fastvideo.sqlite",
+        "source": "skill:gpu_idle_gaps",
+        "start_ns": 89000000000,
+        "end_ns": 110000000000,
+        "gpu_ids": [0]
+      },
+      "explanation": "GPU 0 is idle for 21s between micro-batches. This is the largest pipeline bubble in the trace; the dominant cause is a serialized NCCL collective immediately preceding the idle window.",
+      "suggested_actions": [
+        "Inspect the pipeline-parallel scheduler for stage-boundary syncs",
+        "Verify the collective uses async/overlapping launch settings"
+      ],
+      "false_positive_notes": [
+        "Brief idle windows (<1ms) are kernel-launch overhead, not real stalls"
+      ],
+      "provenance": {"skill": "gpu_idle_gaps", "row_kind": "per_gap"}
+    }
+  ]
+}
+```
 
 ---
 
