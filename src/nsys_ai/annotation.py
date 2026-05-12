@@ -154,11 +154,32 @@ class EvidenceReport:
     (``schema_version``, ``producer``, ``producer_version``). The
     :meth:`from_dict` reader accepts both v0.1 envelopes and legacy
     (envelope-free) JSON payloads.
+
+    .. note::
+       New envelope fields must be added as ``field(..., kw_only=True)``
+       (see ``profile_id`` below). Inserting a non-kw-only field before
+       the existing positional ones would silently shift the positional
+       signature and rebind old callers.
     """
 
     title: str
+    # ``profile_id`` is keyword-only so adding it after the original
+    # ``title`` / ``profile_path`` fields does not shift the positional
+    # signature — pre-v0.1 callers using ``EvidenceReport("T", "/p")``
+    # still get ``profile_path="/p"``, not ``profile_id="/p"``.
     profile_path: str = ""
     findings: list[Finding] = field(default_factory=list)
+    profile_id: str = field(default="", kw_only=True)
+
+    def __post_init__(self) -> None:
+        # Callers occasionally hand in ``pathlib.Path`` even though the
+        # field is typed ``str``. Coerce now so ``to_dict()`` /
+        # ``save_findings`` downstream can JSON-dump without
+        # ``TypeError: Object of type PosixPath is not JSON serializable``.
+        if self.profile_path:
+            import os
+
+            self.profile_path = os.fspath(self.profile_path)
 
     def to_dict(self) -> dict:
         return {
@@ -166,6 +187,7 @@ class EvidenceReport:
             "producer": PRODUCER,
             "producer_version": _producer_version(),
             "title": self.title,
+            "profile_id": self.profile_id,
             "profile_path": self.profile_path,
             "findings": [f.to_dict() for f in self.findings],
         }
@@ -173,11 +195,12 @@ class EvidenceReport:
     @classmethod
     def from_dict(cls, d: dict) -> "EvidenceReport":
         # Envelope fields (schema_version / producer / producer_version)
-        # are informational only — readers ignore them. Legacy payloads
-        # without an envelope load identically.
+        # are informational only — readers ignore them. Pre-profile_id
+        # payloads load with an empty profile_id (additive, not breaking).
         findings = [Finding.from_dict(f) for f in d.get("findings", [])]
         return cls(
             title=d.get("title", "Untitled"),
+            profile_id=d.get("profile_id", ""),
             profile_path=d.get("profile_path", ""),
             findings=findings,
         )

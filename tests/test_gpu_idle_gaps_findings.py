@@ -264,7 +264,8 @@ class TestSerialization:
 class TestEvidenceBuilderIntegration:
     def test_builder_passes_profile_id_to_idle_gaps(self, minimal_nsys_db_path):
         """Real DB integration: TraceSelections produced under EvidenceBuilder
-        carry the profile path as profile_id (the current placeholder identity)."""
+        carry the content-derived ``profile_id`` (``nsys1:sha256:...``)
+        from ``fingerprint.get_profile_id``, *not* the filesystem path."""
         from nsys_ai.evidence_builder import EvidenceBuilder
         from nsys_ai.profile import Profile
 
@@ -272,16 +273,22 @@ class TestEvidenceBuilderIntegration:
             builder = EvidenceBuilder(prof, device=0)
             report = builder.build(only=["idle_gaps"])
 
-        # The minimal fixture may not produce idle-gap findings on every
-        # run; we only assert that *if* idle-gap findings exist they
-        # carry profile_id from the profile path.
+        # The envelope must always be stamped with a content-derived id,
+        # regardless of whether the fixture happened to produce findings.
+        assert report.profile_id.startswith("nsys1:"), report.profile_id
+        assert report.profile_id != str(minimal_nsys_db_path), (
+            "profile_id must be a hash, not the filesystem path"
+        )
+
+        # The envelope and every nested selection share one profile_id;
+        # the minimal fixture may or may not produce idle-gap findings on
+        # any given run, so we only check the per-finding contract when
+        # at least one finding exists.
         idle = [f for f in report.findings if f.category == "idle"]
-        if idle:
-            expected = str(minimal_nsys_db_path)
-            for f in idle:
-                assert f.selection is not None
-                assert f.selection.profile_id == expected
-                assert f.selection.source == "skill:gpu_idle_gaps"
+        for f in idle:
+            assert f.selection is not None
+            assert f.selection.profile_id == report.profile_id
+            assert f.selection.source == "skill:gpu_idle_gaps"
 
     def test_builder_still_works_with_legacy_single_arg_skills(self, minimal_nsys_db_path):
         """Skills whose to_findings_fn is the legacy (rows) single-arg form
@@ -296,3 +303,27 @@ class TestEvidenceBuilderIntegration:
             report = builder.build()
         assert report is not None
         assert isinstance(report.findings, list)
+
+    def test_builder_accepts_pathlib_profile_path(self, minimal_nsys_db_path):
+        """End-to-end regression: passing ``pathlib.Path`` to ``Profile``
+        must flow through ``EvidenceBuilder`` → ``EvidenceReport`` → JSON
+        without crashing on ``Path.encode`` or
+        ``Object of type PosixPath is not JSON serializable``.
+        """
+        import json
+        from pathlib import Path
+
+        from nsys_ai.evidence_builder import EvidenceBuilder
+        from nsys_ai.profile import Profile
+
+        with Profile(Path(minimal_nsys_db_path)) as prof:
+            builder = EvidenceBuilder(prof, device=0)
+            report = builder.build()
+
+        # builder coerces and ``EvidenceReport.__post_init__`` coerces
+        # again as a belt-and-braces guarantee.
+        assert isinstance(report.profile_path, str)
+        assert report.profile_id.startswith("nsys1:"), report.profile_id
+        # JSON-dumpable end-to-end (this is the failure mode if either
+        # coercion regresses).
+        json.dumps(report.to_dict())

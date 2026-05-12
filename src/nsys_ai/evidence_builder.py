@@ -7,6 +7,7 @@ to produce findings with exact nanosecond timestamps for timeline overlay.
 
 import inspect
 import logging
+import os
 from collections.abc import Callable
 
 from .annotation import EvidenceReport, Finding
@@ -82,14 +83,27 @@ class EvidenceBuilder:
                   kernel_hotspots, overlap_ratio, memory_anomalies, h2d_spikes.
                   If None, run all analyzers.
         """
+        from .fingerprint import get_profile_id
         from .skills.registry import get_skill
+
+        # Coerce to str up-front: ``Profile.path`` is whatever the caller
+        # passed (often ``pathlib.Path`` in tests). Both ``get_profile_id``
+        # and downstream JSON serialisation need a real ``str``.
+        raw_path = getattr(self.prof, "path", None)
+        profile_path: str = os.fspath(raw_path) if raw_path is not None else ""
+        # ``profile_id`` is a content-derived stable hash (see
+        # ``fingerprint.get_profile_id``). It uses ``self.prof.conn``
+        # because the META_DATA / TARGET_INFO tables it reads are *not*
+        # part of the parquet cache — only the original SQLite (or a
+        # direct-attach DuckDB view) carries them. Falls back to a
+        # path-derived id when those tables are unreachable
+        # (e.g. backend='parquetdir').
+        profile_id = get_profile_id(getattr(self.prof, "conn", None), fallback_path=profile_path)
 
         findings: list[Finding] = []
         # v0.1 context handed to upgraded skills' to_findings_fn for
         # constructing TraceSelection / EvidenceRow with provenance.
-        # profile_id is sourced from the profile's filesystem path until
-        # a stable content fingerprint is wired through.
-        context: dict = {"profile_id": str(getattr(self.prof, "path", ""))}
+        context: dict = {"profile_id": profile_id}
         for analyzer_name, (skill_name, params) in self._SKILL_PIPELINE.items():
             if only is not None and analyzer_name not in only:
                 continue
@@ -120,6 +134,7 @@ class EvidenceBuilder:
 
         return EvidenceReport(
             title="Auto-Analysis",
-            profile_path=getattr(self.prof, "path", ""),
+            profile_id=profile_id,
+            profile_path=profile_path,
             findings=findings,
         )
