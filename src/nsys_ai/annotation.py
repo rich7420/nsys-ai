@@ -154,6 +154,12 @@ class EvidenceReport:
     (``schema_version``, ``producer``, ``producer_version``). The
     :meth:`from_dict` reader accepts both v0.1 envelopes and legacy
     (envelope-free) JSON payloads.
+
+    .. note::
+       New envelope fields must be added as ``field(..., kw_only=True)``
+       (see ``profile_id`` below). Inserting a non-kw-only field before
+       the existing positional ones would silently shift the positional
+       signature and rebind old callers.
     """
 
     title: str
@@ -164,6 +170,16 @@ class EvidenceReport:
     profile_path: str = ""
     findings: list[Finding] = field(default_factory=list)
     profile_id: str = field(default="", kw_only=True)
+
+    def __post_init__(self) -> None:
+        # Callers occasionally hand in ``pathlib.Path`` even though the
+        # field is typed ``str``. Coerce now so ``to_dict()`` /
+        # ``save_findings`` downstream can JSON-dump without
+        # ``TypeError: Object of type PosixPath is not JSON serializable``.
+        if self.profile_path:
+            import os
+
+            self.profile_path = os.fspath(self.profile_path)
 
     def to_dict(self) -> dict:
         return {

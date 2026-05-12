@@ -790,6 +790,26 @@ class TestEvidenceReportEnvelope:
         restored = EvidenceReport.from_dict({"title": "T", "profile_path": "/p"})
         assert restored.profile_id == ""
 
+    def test_post_init_coerces_pathlib_profile_path(self):
+        """``EvidenceReport.profile_path`` is typed ``str``, but callers
+        sometimes hand in ``pathlib.Path``. ``__post_init__`` coerces so
+        downstream JSON serialization doesn't choke on PosixPath.
+        """
+        import json
+        from pathlib import Path
+
+        report = EvidenceReport(title="T", profile_path=Path("/x.sqlite"))
+        assert isinstance(report.profile_path, str)
+        assert report.profile_path == "/x.sqlite"
+        # to_dict + json.dumps must work end-to-end
+        json.dumps(report.to_dict())
+
+    def test_post_init_leaves_empty_profile_path_alone(self):
+        """Default empty ``profile_path`` must stay an empty string after
+        ``__post_init__`` — don't crash, don't replace with ``"."``."""
+        report = EvidenceReport(title="T")
+        assert report.profile_path == ""
+
     def test_profile_id_is_keyword_only(self):
         """Regression for Copilot review: ``profile_id`` was originally
         inserted before ``profile_path`` in the dataclass fields, which

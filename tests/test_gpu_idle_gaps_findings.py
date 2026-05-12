@@ -303,3 +303,27 @@ class TestEvidenceBuilderIntegration:
             report = builder.build()
         assert report is not None
         assert isinstance(report.findings, list)
+
+    def test_builder_accepts_pathlib_profile_path(self, minimal_nsys_db_path):
+        """End-to-end regression: passing ``pathlib.Path`` to ``Profile``
+        must flow through ``EvidenceBuilder`` → ``EvidenceReport`` → JSON
+        without crashing on ``Path.encode`` or
+        ``Object of type PosixPath is not JSON serializable``.
+        """
+        import json
+        from pathlib import Path
+
+        from nsys_ai.evidence_builder import EvidenceBuilder
+        from nsys_ai.profile import Profile
+
+        with Profile(Path(minimal_nsys_db_path)) as prof:
+            builder = EvidenceBuilder(prof, device=0)
+            report = builder.build()
+
+        # builder coerces and ``EvidenceReport.__post_init__`` coerces
+        # again as a belt-and-braces guarantee.
+        assert isinstance(report.profile_path, str)
+        assert report.profile_id.startswith("nsys1:"), report.profile_id
+        # JSON-dumpable end-to-end (this is the failure mode if either
+        # coercion regresses).
+        json.dumps(report.to_dict())
