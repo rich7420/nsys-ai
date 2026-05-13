@@ -35,18 +35,64 @@ Environment (large profiles / DuckDB tuning):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import sys
 import time
+from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 
 import duckdb
 
+# fcntl is POSIX-only. On Windows we degrade to no-locking — concurrent
+# builders may then race redundantly, but ``build_cache``'s tmp_dir +
+# atomic rename still keeps the cache consistent.
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None  # type: ignore[assignment]
+
 log = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _build_lock(cache_dir: Path) -> Iterator[None]:
+    """Serialize cache builds for one profile across threads and processes.
+
+    Used by :func:`build_cache` to guarantee that two concurrent callers
+    against the same profile (e.g. ``nsys-ai`` running in two terminals)
+    do *not* both run the full ETL — the second waits on the lock, then
+    re-checks :func:`is_cache_valid` inside the critical section and
+    returns immediately when the first has already published the cache.
+
+    The lock file lives at ``<cache_dir>.build.lock`` next to the cache.
+    ``fcntl.flock`` is associated with the file descriptor, so the lock
+    is released automatically when the fd closes (including on process
+    crash).
+    """
+    if _fcntl is None:
+        # Windows: no flock. Two builders may run redundantly, but the
+        # tmp_dir + atomic rename below still keeps the cache consistent.
+        yield
+        return
+    cache_dir.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_dir.parent / f"{cache_dir.name}.build.lock"
+    # ``flock`` does not require a writable fd, so open the lock
+    # ``O_RDONLY``: a second user without write permission on a lock
+    # file created by the first user (default ``0o644``) can still
+    # acquire and release it. ``O_CLOEXEC`` prevents the fd leaking
+    # into any subprocess we spawn during the build.
+    fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    try:
+        _fcntl.flock(fd, _fcntl.LOCK_EX)  # blocks until acquired
+        yield
+    finally:
+        # flock is held on the fd — closing releases it.
+        os.close(fd)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
 _CACHE_VERSION = 12  # bumped: sync.parquet now includes deviceId for per-rank sync attribution
@@ -137,52 +183,75 @@ def build_cache(sqlite_path: str) -> Path:
     ZSTD compression, and generates ``nvtx_kernel_map.parquet`` using the
     Python Tier 2 sort-merge logic.
 
+    Concurrency: serialized by :func:`_build_lock` across threads and
+    processes operating on the same profile, with a double-checked
+    :func:`is_cache_valid` inside the critical section — when a second
+    caller waits out the first, it returns the freshly-built cache
+    without re-running the ETL.
+
+    The lock is *only* acquired when a build is actually needed; an
+    initial ``is_cache_valid`` fast-path return avoids opening the lock
+    file at all when the cache is already good. This matters for
+    read-only profile directories (NFS / read-only mounts) where the
+    cache is readable but the lock file cannot be created.
+
     Returns the cache directory path.
     """
     import shutil
     import tempfile
 
     cache_dir = _cache_dir_for(sqlite_path)
-    # Build into a temp dir first, then atomically rename to avoid race
-    # conditions when multiple threads/processes open the same profile.
-    tmp_dir = Path(
-        tempfile.mkdtemp(
-            prefix=".parquet_build_",
-            dir=cache_dir.parent,
+    # Fast path: cache already valid — no lock file creation needed.
+    # Lets read-only profile directories work as long as the cache was
+    # built earlier (e.g. by a previous writable session).
+    if is_cache_valid(sqlite_path):
+        return cache_dir
+    with _build_lock(cache_dir):
+        # Double-checked locking: another process may have built the
+        # cache while we were waiting on the lock. Skip redundant ETL.
+        if is_cache_valid(sqlite_path):
+            return cache_dir
+
+        # Build into a temp dir first, then atomically rename to avoid race
+        # conditions when multiple threads/processes open the same profile.
+        tmp_dir = Path(
+            tempfile.mkdtemp(
+                prefix=".parquet_build_",
+                dir=cache_dir.parent,
+            )
         )
-    )
-    try:
-        _build_cache_into(sqlite_path, tmp_dir)
-    except BaseException:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
+        try:
+            _build_cache_into(sqlite_path, tmp_dir)
+        except BaseException:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
-    # Atomic swap: rename old cache aside, rename new into place, then clean up.
-    # This avoids a window where the cache directory is missing for concurrent readers.
-    # Use PID in the old-dir name so concurrent builders don't collide.
-    old_dir = cache_dir.parent / f"{cache_dir.name}.old.{os.getpid()}"
-    if old_dir.exists():
-        shutil.rmtree(old_dir, ignore_errors=True)
+        # Atomic swap: rename old cache aside, rename new into place, then clean up.
+        # This avoids a window where the cache directory is missing for concurrent readers.
+        # Use PID in the old-dir name so concurrent builders don't collide.
+        old_dir = cache_dir.parent / f"{cache_dir.name}.old.{os.getpid()}"
+        if old_dir.exists():
+            shutil.rmtree(old_dir, ignore_errors=True)
 
-    try:
-        if cache_dir.exists():
-            cache_dir.rename(old_dir)
-        tmp_dir.rename(cache_dir)
-    except (FileExistsError, OSError):
-        # Another process won the race and created cache_dir first.
-        # Discard our redundant build.
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        # Restore old_dir if cache_dir does not exist (failed for other transient reasons)
-        if old_dir.exists() and not cache_dir.exists():
-            try:
-                old_dir.rename(cache_dir)
-            except OSError:
-                pass
+        try:
+            if cache_dir.exists():
+                cache_dir.rename(old_dir)
+            tmp_dir.rename(cache_dir)
+        except (FileExistsError, OSError):
+            # Belt-and-braces: the build lock already prevents this race
+            # for cooperating callers, but the tmp_dir + rename dance
+            # is preserved for older readers that bypass the lock.
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            if old_dir.exists() and not cache_dir.exists():
+                try:
+                    old_dir.rename(cache_dir)
+                except OSError:
+                    pass
 
-    # Clean up the old cache (now renamed aside) if we have a robust valid cache.
-    if old_dir.exists() and cache_dir.exists():
-        shutil.rmtree(old_dir, ignore_errors=True)
-    return cache_dir
+        # Clean up the old cache (now renamed aside) if we have a robust valid cache.
+        if old_dir.exists() and cache_dir.exists():
+            shutil.rmtree(old_dir, ignore_errors=True)
+        return cache_dir
 
 
 def _safe_path(p: Path) -> str:
