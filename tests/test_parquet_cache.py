@@ -105,6 +105,81 @@ class TestBuildAndOpen:
                 assert joined[0][1] is None or isinstance(joined[0][1], str)
             db.close()
 
+    def test_nvtx_high_filters_aten_events(self, tmp_path):
+        """nvtx_high.parquet should exclude aten::*/cudaLaunch%/cudaMemcpy%."""
+        import sqlite3
+
+        # Build a tiny sqlite with a mix of high-level + aten:: NVTX rows so we
+        # can verify the filter behaviour deterministically.
+        db_path = tmp_path / "phase4_nvtx_high.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+            CREATE TABLE TARGET_INFO_GPU (
+                id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT DEFAULT '',
+                totalMemory INTEGER DEFAULT 0, smCount INTEGER DEFAULT 0,
+                chipName TEXT DEFAULT '', memoryBandwidth INTEGER DEFAULT 0
+            );
+            CREATE TABLE TARGET_INFO_CUDA_DEVICE (
+                gpuId INTEGER, cudaId INTEGER, pid INTEGER DEFAULT 0,
+                uuid TEXT DEFAULT '', numMultiprocessors INTEGER DEFAULT 0
+            );
+            CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+                globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0,
+                streamId INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+                start INTEGER NOT NULL, end INTEGER NOT NULL,
+                shortName INTEGER NOT NULL, demangledName INTEGER DEFAULT 0,
+                gridX INTEGER DEFAULT 1, gridY INTEGER DEFAULT 1, gridZ INTEGER DEFAULT 1,
+                blockX INTEGER DEFAULT 1, blockY INTEGER DEFAULT 1, blockZ INTEGER DEFAULT 1
+            );
+            CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+                globalTid INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+                start INTEGER NOT NULL, end INTEGER NOT NULL, nameId INTEGER DEFAULT 0
+            );
+            CREATE TABLE NVTX_EVENTS (
+                globalTid INTEGER DEFAULT 0, start INTEGER NOT NULL,
+                end INTEGER DEFAULT -1, text TEXT DEFAULT '',
+                eventType INTEGER DEFAULT 59, rangeId INTEGER DEFAULT 0,
+                textId INTEGER DEFAULT NULL
+            );
+            INSERT INTO StringIds VALUES (1, 'k_x');
+            INSERT INTO TARGET_INFO_GPU VALUES
+                (0, 'Test', '', 8589934592, 108, 'TestChip', 0);
+            INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, '', 108);
+            INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+                (100, 0, 7, 1, 1000, 2000, 1, 1, 1, 1, 1, 1, 1, 1);
+            INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (100, 1, 900, 1000, 0);
+            -- Mix of NVTX events: should keep / should drop
+            INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) VALUES
+                (100, 100, 5000, 'stage::DenoisingStage', 59, 0),    -- keep
+                (100, 200, 4000, 'FlashAttnFunc', 59, 1),            -- keep
+                (100, 300, 3500, 'nccl:all_to_all', 59, 2),          -- keep
+                (100, 400, 3000, 'aten::linear', 59, 3),             -- DROP
+                (100, 500, 2500, 'aten::layer_norm', 59, 4),         -- DROP
+                (100, 600, 2400, 'cudaLaunchKernel', 59, 5),         -- DROP
+                (100, 700, 2300, 'cudaMemcpyAsync', 59, 6);          -- DROP
+        """)
+        conn.close()
+
+        cache_dir = parquet_cache.build_cache(str(db_path))
+        nvtx_high = cache_dir / "nvtx_high.parquet"
+        assert nvtx_high.is_file(), "nvtx_high.parquet should be created"
+
+        import duckdb
+        db = duckdb.connect()
+        try:
+            rows = db.execute(f"""
+                SELECT text FROM read_parquet('{nvtx_high.as_posix()}')
+                ORDER BY text
+            """).fetchall()
+        finally:
+            db.close()
+
+        kept = sorted(r[0] for r in rows)
+        assert kept == sorted(
+            ["FlashAttnFunc", "nccl:all_to_all", "stage::DenoisingStage"]
+        ), f"unexpected nvtx_high rows: {kept}"
+
     def test_invalidate_cache(self, minimal_nsys_db_path):
         """invalidate_cache should remove the cache directory."""
         parquet_cache.build_cache(minimal_nsys_db_path)

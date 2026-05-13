@@ -120,7 +120,17 @@ def _execute(conn, **kwargs):
             tables = adapter.resolve_activity_tables()
             kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
             runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
+            # Prefer nvtx_high (aten::*/cudaLaunch% filtered out) when the
+            # cache provides it — IEJoin runs ~20× faster on typical PyTorch
+            # traces because op-level rows are dropped. Fall back to full
+            # nvtx if the high-level view is unavailable (older caches or
+            # non-cached profiles).
             nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+            try:
+                conn.execute("SELECT 1 FROM nvtx_high LIMIT 1")
+                nvtx_table = "nvtx_high"
+            except DB_ERRORS:
+                pass
             has_textid = adapter.detect_nvtx_text_id()
             if has_textid:
                 text_expr = "COALESCE(n.text, ns.value)"
@@ -659,7 +669,14 @@ def _execute(conn, **kwargs):
                     tables = adapter.resolve_activity_tables()
                     kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
                     runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
+                    # Same nvtx_high fallback as the earlier slow path —
+                    # see comment around the first occurrence.
                     nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+                    try:
+                        conn.execute("SELECT 1 FROM nvtx_high LIMIT 1")
+                        nvtx_table = "nvtx_high"
+                    except DB_ERRORS:
+                        pass
                     kr_where = ""
                     nvtx_where = ""
                     params_k = []
