@@ -61,23 +61,108 @@ def _auto_trim_enabled() -> bool:
     return os.environ.get("NSYS_AI_MANIFEST_AUTO_TRIM", "1").strip().lower() not in _AUTO_TRIM_FALSE_TOKENS
 
 
+def _resolve_nvtx_table_for_auto_trim(prof) -> str | None:
+    """Find a NVTX-bearing table or view we can scan for iteration markers.
+
+    Preference order:
+      * ``nvtx_high`` view — DuckDB cache, aten::* already filtered.
+      * ``nvtx`` view — DuckDB cache, full NVTX with resolved text.
+      * Versioned canonical table — ``NVTX_EVENTS`` / ``NVTX_EVENTS_V2`` /
+        ``NVTX_EVENTS_V3`` (the actual nsys export schema for the version
+        we attached). Resolved via ``prof.schema.tables`` rather than
+        hardcoded so newer Nsight exports without an unversioned alias
+        still work.
+
+    Returns the chosen name or ``None`` when no NVTX source can be opened.
+    """
+    import sqlite3
+
+    import duckdb
+
+    # Cache-view candidates always have resolved text (no StringIds join
+    # needed by the caller). Probe each; pick the first that can be
+    # opened.
+    for candidate in ("nvtx_high", "nvtx"):
+        try:
+            prof._duckdb_query(f"SELECT 1 FROM {candidate} LIMIT 1")
+            return candidate
+        except (sqlite3.Error, duckdb.Error):
+            continue
+
+    # Raw-SQLite path: walk the actual schema for an NVTX-prefixed name.
+    try:
+        tables = set(prof.schema.tables)
+    except Exception:
+        tables = set()
+    if "NVTX_EVENTS" in tables:
+        return "NVTX_EVENTS"
+    for t in sorted(tables):
+        if t.startswith("NVTX_EVENTS"):
+            return t
+    return None
+
+
+def _build_auto_trim_nvtx_sql(prof, nvtx_table: str) -> str:
+    """SQL that picks the middle instance of the dominant NVTX iteration.
+
+    Cache views (``nvtx_high`` / ``nvtx``) already carry resolved text in
+    the ``text`` column — no StringIds join needed. The raw
+    ``NVTX_EVENTS`` family does need the join when the export stores
+    labels via ``textId`` (newer Nsight schemas with
+    ``sqlite_all_varchar=true`` attach), so we COALESCE the two and
+    LEFT JOIN ``StringIds`` only on that path.
+    """
+    is_cache_view = nvtx_table in ("nvtx_high", "nvtx")
+    if is_cache_view:
+        text_expr = "n.text"
+        text_join = ""
+    else:
+        text_expr = "COALESCE(n.text, s.value)"
+        text_join = "LEFT JOIN StringIds s ON n.textId = s.id"
+    return f"""
+        WITH ranged AS (
+            SELECT {text_expr} AS text, n.start, n.[end]
+            FROM {nvtx_table} n
+            {text_join}
+            WHERE {text_expr} IS NOT NULL
+              AND n.[end] > n.start
+              AND {text_expr} NOT LIKE 'aten::%'
+              AND {text_expr} NOT LIKE 'cudaLaunch%'
+              AND {text_expr} NOT LIKE 'cudaMemcpy%'
+        )
+        SELECT text, start, [end] FROM ranged
+        WHERE text = (
+            SELECT text FROM ranged
+            GROUP BY text
+            HAVING COUNT(*) >= 3
+            ORDER BY SUM([end] - start) DESC, text ASC
+            LIMIT 1
+        )
+        ORDER BY start
+    """
+
+
 def _auto_select_trim_window(prof) -> tuple[int, int] | None:
     """Pick a representative steady-state window for a long profile.
 
     Returns ``(start_ns, end_ns)`` to feed into sub-skills as
-    ``trim_start_ns`` / ``trim_end_ns``, or ``None`` when no trim is
-    needed (profile span below threshold) or no signal is available.
+    ``trim_start_ns`` / ``trim_end_ns``, or ``None`` when no trim should
+    be applied — either because the profile span is at/under the
+    threshold, or because the time_range itself is unusable (None,
+    inverted, missing meta).
 
     Strategy:
-      1. If profile span ≤ ``_AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS``,
+      1. If profile span ``≤ _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS``,
          return None — the full manifest will fit a normal turn budget.
-      2. Otherwise, find the top non-`aten::*` NVTX range name with
+      2. Otherwise, find the top non-``aten::*`` NVTX range name with
          ≥ 3 instances (iteration / stage marker) and pick the *middle*
          instance — skips index-0 JIT warmup. If the chosen instance is
          wider than ``_AUTO_TRIM_TARGET_WINDOW_NS``, trim further to the
          middle of that range.
       3. If no qualifying NVTX range exists, fall back to the middle
-         ``_AUTO_TRIM_TARGET_WINDOW_NS`` of the profile span.
+         ``_AUTO_TRIM_TARGET_WINDOW_NS`` of the profile span — better
+         to land near steady state than to scan head-of-trace JIT plus
+         tail teardown.
 
     Failures are absorbed — auto-trim is best-effort; the caller proceeds
     untrimmed when this returns None or raises.
@@ -94,52 +179,28 @@ def _auto_select_trim_window(prof) -> tuple[int, int] | None:
     if start_ns is None or end_ns is None or end_ns <= start_ns:
         return None
     span_ns = end_ns - start_ns
-    if span_ns < _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS:
+    # Use ≤ so the boundary matches the docstring contract — a span
+    # exactly equal to the threshold is short enough to not need trim.
+    if span_ns <= _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS:
         return None
 
-    # Query the highest-volume non-op-level NVTX range and order its
-    # instances by start so we can pick the middle one. The CTE form
-    # works on both `nvtx_high` and full `nvtx` (DuckDB cache view) and
-    # on raw `NVTX_EVENTS` (SQLite fallback); _duckdb_query translates
-    # the [end] dialect when needed.
-    #
     # Probe candidates in preference order. The first one that can be
     # opened wins — `nvtx_high` is fastest because aten::* is already
     # filtered, but it only exists on _CACHE_VERSION ≥ 14 caches.
-    nvtx_table = "NVTX_EVENTS"  # final fallback; main query catches missing-table
-    for candidate in ("nvtx_high", "nvtx", "NVTX_EVENTS"):
+    # `nvtx` is the resolved-text cache view. `NVTX_EVENTS` (and its
+    # versioned variants) is the raw SQLite table.
+    nvtx_table = _resolve_nvtx_table_for_auto_trim(prof)
+    if nvtx_table is None:
+        # No NVTX source at all → skip the SQL path and fall straight to
+        # the middle-of-span fallback below.
+        rows: list = []
+    else:
+        sql = _build_auto_trim_nvtx_sql(prof, nvtx_table)
         try:
-            prof._duckdb_query(f"SELECT 1 FROM {candidate} LIMIT 1")
-            nvtx_table = candidate
-            break
-        except (sqlite3.Error, duckdb.Error):
-            continue
-
-    sql = f"""
-        WITH ranged AS (
-            SELECT text, start, [end]
-            FROM {nvtx_table}
-            WHERE text IS NOT NULL
-              AND [end] > start
-              AND text NOT LIKE 'aten::%'
-              AND text NOT LIKE 'cudaLaunch%'
-              AND text NOT LIKE 'cudaMemcpy%'
-        )
-        SELECT text, start, [end] FROM ranged
-        WHERE text = (
-            SELECT text FROM ranged
-            GROUP BY text
-            HAVING COUNT(*) >= 3
-            ORDER BY SUM([end] - start) DESC, text ASC
-            LIMIT 1
-        )
-        ORDER BY start
-    """
-    try:
-        rows = prof._duckdb_query(sql)
-    except (sqlite3.Error, duckdb.Error) as exc:
-        _log.debug("auto-trim NVTX query failed: %s", exc)
-        rows = []
+            rows = prof._duckdb_query(sql)
+        except (sqlite3.Error, duckdb.Error) as exc:
+            _log.debug("auto-trim NVTX query failed: %s", exc)
+            rows = []
 
     if rows:
         # Skip the first instance (JIT warmup / one-time setup cost) and
@@ -172,12 +233,25 @@ def _execute(conn, **kwargs):
     device = int(kwargs.get("device", 0))
     overhead_ns = kwargs.get("overhead_ns", 0)
 
-    # Forward trim kwargs if present
+    # Forward trim kwargs if present. Treat trim as "explicit" only when
+    # BOTH endpoints are supplied — a partial trim is unusable downstream
+    # (sub-skills ignore it) and would otherwise silence auto-trim while
+    # leaving the manifest scanning the full profile.
     trim_kwargs = {}
     for k in ("trim_start_ns", "trim_end_ns"):
         if kwargs.get(k) is not None:
             trim_kwargs[k] = kwargs[k]
-    explicit_trim = bool(trim_kwargs)
+    explicit_trim = (
+        "trim_start_ns" in trim_kwargs and "trim_end_ns" in trim_kwargs
+    )
+    if trim_kwargs and not explicit_trim:
+        # Drop the partial trim so it can't be forwarded to sub-skills
+        # in a half-useless state; auto-trim (below) will replace it.
+        _log.debug(
+            "manifest: partial trim_kwargs %s discarded; will auto-trim if long",
+            list(trim_kwargs),
+        )
+        trim_kwargs = {}
 
     # ── 1. Profile metadata ──────────────────────────────────────
     prof = Profile._from_conn(conn)

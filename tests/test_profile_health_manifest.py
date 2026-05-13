@@ -256,6 +256,74 @@ class TestManifestAutoTrim:
         # didn't switch it off.
         assert rows[0]["data_quality"].get("auto_trim", {}).get("applied") is True
 
+    def test_auto_trim_applied_block_present_in_manifest(
+        self, monkeypatch, minimal_nsys_conn, manifest_skill
+    ):
+        """Positive coverage: when the selector returns a window, the
+        manifest emits a complete `data_quality.auto_trim` block.
+
+        Stubs the selector so the test doesn't depend on the fixture
+        actually having NVTX iteration markers — focuses on the
+        `_execute()` plumbing.
+        """
+        fake_t0, fake_t1 = 1_000_000, 5_000_000  # 1 ms – 5 ms within fixture
+        monkeypatch.setattr(
+            "nsys_ai.skills.builtins.profile_health_manifest._auto_select_trim_window",
+            lambda _prof: (fake_t0, fake_t1),
+        )
+        rows = manifest_skill.execute(minimal_nsys_conn, device=0)
+        dq = rows[0]["data_quality"]
+        assert "auto_trim" in dq, "expected auto_trim block when selector returns a window"
+        at = dq["auto_trim"]
+        assert at["applied"] is True
+        assert at["trim_start_ns"] == fake_t0
+        assert at["trim_end_ns"] == fake_t1
+        assert at["window_ms"] == round((fake_t1 - fake_t0) / 1e6, 1)
+        # profile_full_span_ms must show the ORIGINAL profile length,
+        # not the trim window — that's the whole point of carrying it.
+        assert at["profile_full_span_ms"] >= at["window_ms"]
+        # And the top-level profile_span_ms should reflect the window.
+        assert rows[0]["profile_span_ms"] == at["window_ms"]
+
+    def test_partial_trim_does_not_block_auto_trim(
+        self, monkeypatch, minimal_nsys_conn, manifest_skill
+    ):
+        """Only one trim endpoint supplied → treat as no explicit trim.
+
+        Otherwise long profiles would silently scan in full because the
+        partial trim flag-set toggles `explicit_trim` to True but the
+        sub-skills' filters need BOTH endpoints to fire.
+        """
+        monkeypatch.setattr(
+            "nsys_ai.skills.builtins.profile_health_manifest._AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS",
+            0,
+        )
+        # Only start, no end — partial trim
+        rows = manifest_skill.execute(
+            minimal_nsys_conn,
+            device=0,
+            trim_start_ns=500_000,
+        )
+        # Auto-trim should kick in because explicit_trim was False
+        # (partial trim got discarded).
+        assert rows[0]["data_quality"].get("auto_trim", {}).get("applied") is True
+
+    def test_span_exactly_at_threshold_returns_none(self):
+        """Boundary contract: span == threshold → no trim.
+
+        Matches the docstring (≤ threshold returns None) and protects
+        against the off-by-one between < / ≤ that PR review caught.
+        """
+        from nsys_ai.skills.builtins.profile_health_manifest import (
+            _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS,
+        )
+
+        prof = self._make_profile_stub(span_ns=_AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS)
+        assert _auto_select_trim_window(prof) is None
+        # And one ns over the threshold should trip the auto-trim path.
+        prof = self._make_profile_stub(span_ns=_AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS + 1)
+        assert _auto_select_trim_window(prof) is not None
+
 
 class TestManifestFormat:
     def test_format_includes_header(self, minimal_nsys_conn, manifest_skill):
