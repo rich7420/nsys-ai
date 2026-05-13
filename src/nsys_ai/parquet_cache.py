@@ -938,7 +938,7 @@ def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) 
                            {_expr("textId", "BIGINT")}
                     FROM srcv.{nvtx_table} n
                     LEFT JOIN srcv.StringIds s ON n.textId = s.id
-                    ORDER BY n.globalTid, CAST(n.start AS BIGINT)
+                    ORDER BY TRY_CAST(n.globalTid AS BIGINT), TRY_CAST(n.start AS BIGINT)
                 ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
         else:
@@ -964,7 +964,7 @@ def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) 
                            {binary_expr},
                            {text_expr} AS text
                     FROM srcv.{nvtx_table} n
-                    ORDER BY n.globalTid, CAST(n.start AS BIGINT)
+                    ORDER BY TRY_CAST(n.globalTid AS BIGINT), TRY_CAST(n.start AS BIGINT)
                 ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
     finally:
@@ -1061,23 +1061,23 @@ def _build_nvtx_kernel_map(
     kp = cache_dir / "kernels.parquet"
     rp = cache_dir / "runtime.parquet"
     np = cache_dir / "nvtx.parquet"
-    # Prefer nvtx_high.parquet — it drops op-level rows that don't contribute
-    # meaningful attribution but dominate the row count (95%+ on PyTorch
-    # traces). The IEJoin cost scales with NVTX row count, so this typically
-    # shrinks map-build time by 10-20×. Falls back to full nvtx.parquet when
-    # absent (older caches built before _CACHE_VERSION 14).
-    np_high = cache_dir / "nvtx_high.parquet"
-    nvtx_src = np_high if np_high.is_file() else np
-    if not (kp.is_file() and rp.is_file() and nvtx_src.is_file()):
+    # IEJoin source must be the full nvtx.parquet, NOT nvtx_high.parquet.
+    # nvtx_kernel_map is the canonical "kernel → enclosing NVTX range" mapping
+    # used by attribute_kernels_to_nvtx() and downstream skills via the fast
+    # path. Using a filtered source would silently drop kernels whose only
+    # enclosing ranges are aten::* — e.g. emit_nvtx-style PyTorch traces with
+    # no higher-level wrappers — and downstream callers won't fall back to
+    # full nvtx when nvtx_kernel_map exists but is empty/incomplete.
+    # The slow path in nvtx_layer_breakdown still benefits from nvtx_high
+    # (see _pick_nvtx_view in that file).
+    if not (kp.is_file() and rp.is_file() and np.is_file()):
         log.warning("Parquet prerequisites missing for nvtx_kernel_map; using Python fallback")
         _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)
         return
 
     kps = _safe_path(kp)
     rps = _safe_path(rp)
-    nps = _safe_path(nvtx_src)
-    nvtx_src_label = "nvtx_high.parquet" if nvtx_src is np_high else "nvtx.parquet"
-    log.info("Building nvtx_kernel_map from %s (IEJoin)", nvtx_src_label)
+    nps = _safe_path(np)
 
     # nvtx.parquet already stores resolved text (export path); no StringIds join.
 

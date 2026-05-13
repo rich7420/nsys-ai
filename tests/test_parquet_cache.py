@@ -208,6 +208,54 @@ class TestBuildAndOpen:
             ["FlashAttnFunc", "nccl:all_to_all", "stage::DenoisingStage"]
         ), f"unexpected nvtx_high rows: {[r[0] for r in rows]}"
 
+    def test_nvtx_kernel_map_uses_full_nvtx_not_high(self, tmp_path):
+        """Regression: nvtx_kernel_map.parquet must include kernels whose only
+        enclosing NVTX ranges are aten::* (e.g. emit_nvtx-style traces).
+
+        If _build_nvtx_kernel_map() sourced the IEJoin from nvtx_high.parquet
+        instead of full nvtx.parquet, such kernels would silently disappear
+        from the precomputed map and the fast path in nvtx_layer_breakdown
+        would return zero attribution.
+        """
+        import duckdb
+
+        # Single kernel inside two aten:: enclosing ranges. Both ranges match
+        # the nvtx_high exclusion list — so the precomputed map MUST be built
+        # from full nvtx.parquet to retain attribution.
+        nvtx_rows = [
+            (100, 100_000, 5_000_000, "aten::linear", 59, 0),
+            (100, 200_000, 4_000_000, "aten::layer_norm", 59, 1),
+        ]
+        db_path = _make_nsys_sqlite(tmp_path, "kmap_aten_only.sqlite", nvtx_rows)
+        cache_dir = parquet_cache.build_cache(str(db_path))
+
+        kmap = cache_dir / "nvtx_kernel_map.parquet"
+        if not kmap.is_file():
+            pytest.skip("nvtx_kernel_map.parquet not built on this profile")
+
+        check = duckdb.connect()
+        try:
+            n_rows = check.execute(
+                f"SELECT COUNT(*) FROM read_parquet('{kmap.as_posix()}')"
+            ).fetchone()[0]
+            sample = check.execute(
+                f"SELECT kernel_name, nvtx_text "
+                f"FROM read_parquet('{kmap.as_posix()}') LIMIT 5"
+            ).fetchall()
+        finally:
+            check.close()
+
+        assert n_rows >= 1, (
+            "nvtx_kernel_map.parquet is empty on aten::-only trace; "
+            "_build_nvtx_kernel_map() must source from full nvtx.parquet, "
+            "not the filtered nvtx_high.parquet"
+        )
+        # The leaf attribution should be one of the aten:: ranges we seeded.
+        leaves = [r[1] for r in sample]
+        assert any("aten::" in (text or "") for text in leaves), (
+            f"expected an aten:: leaf in nvtx_kernel_map, got {leaves}"
+        )
+
     def test_nvtx_high_empty_falls_back_in_layer_breakdown(self, tmp_path):
         """When nvtx_high.parquet exists but is empty (profile is all aten::*),
         nvtx_layer_breakdown should still return attribution by reading the
