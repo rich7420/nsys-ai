@@ -49,7 +49,7 @@ _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS = 120 * 10**9   # 120 s
 _AUTO_TRIM_TARGET_WINDOW_NS = 20 * 10**9             # 20 s
 
 
-def _auto_select_trim_window(prof, conn) -> tuple[int, int] | None:
+def _auto_select_trim_window(prof) -> tuple[int, int] | None:
     """Pick a representative steady-state window for a long profile.
 
     Returns ``(start_ns, end_ns)`` to feed into sub-skills as
@@ -78,7 +78,10 @@ def _auto_select_trim_window(prof, conn) -> tuple[int, int] | None:
         start_ns, end_ns = prof.meta.time_range
     except Exception:
         return None
-    span_ns = (end_ns or 0) - (start_ns or 0)
+    # Profiles missing or with a degenerate time_range can't be trimmed.
+    if start_ns is None or end_ns is None or end_ns <= start_ns:
+        return None
+    span_ns = end_ns - start_ns
     if span_ns < _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS:
         return None
 
@@ -175,18 +178,24 @@ def _execute(conn, **kwargs):
     auto_trim_meta: dict | None = None
     if not explicit_trim and os.environ.get("NSYS_AI_MANIFEST_AUTO_TRIM", "1") != "0":
         try:
-            picked = _auto_select_trim_window(prof, conn)
+            picked = _auto_select_trim_window(prof)
         except Exception as exc:  # noqa: BLE001 — best-effort, never block manifest
             _log.debug("manifest auto-trim selection failed: %s", exc, exc_info=True)
             picked = None
         if picked is not None:
             t0, t1 = picked
             trim_kwargs = {"trim_start_ns": int(t0), "trim_end_ns": int(t1)}
+            # Preserve the original profile span — the standard
+            # `profile_span_ms` below will reflect the trim window, so a
+            # caller who wants to know "this is a 10-minute profile"
+            # would otherwise see 20 s. The pre-trim span lives here.
+            full_start, full_end = prof.meta.time_range
             auto_trim_meta = {
                 "applied": True,
                 "trim_start_ns": int(t0),
                 "trim_end_ns": int(t1),
                 "window_ms": round((t1 - t0) / 1e6, 1),
+                "profile_full_span_ms": round((full_end - full_start) / 1e6, 1),
             }
             _log.info(
                 "manifest auto-trimmed to %.2fs–%.2fs (%.1fs window) on long profile",
