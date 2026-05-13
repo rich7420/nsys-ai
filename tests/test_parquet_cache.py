@@ -204,6 +204,13 @@ class TestConcurrentBuild:
         for t in threads:
             t.join(timeout=30)
 
+        # If any thread is still alive the lock has deadlocked.
+        # Surface that immediately rather than letting a zombie thread
+        # leak into later tests where it could rebuild the cache and
+        # confuse unrelated assertions.
+        stuck = [t.name for t in threads if t.is_alive()]
+        assert not stuck, f"threads did not finish within 30s: {stuck}"
+
         assert errors == [], f"runners raised: {errors!r}"
         assert len(caches) == num_threads, (
             f"all {num_threads} runners must complete; got {len(caches)}"

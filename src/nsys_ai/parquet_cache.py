@@ -81,7 +81,12 @@ def _build_lock(cache_dir: Path) -> Iterator[None]:
         return
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
     lock_path = cache_dir.parent / f"{cache_dir.name}.build.lock"
-    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+    # ``flock`` does not require a writable fd, so open the lock
+    # ``O_RDONLY``: a second user without write permission on a lock
+    # file created by the first user (default ``0o644``) can still
+    # acquire and release it. ``O_CLOEXEC`` prevents the fd leaking
+    # into any subprocess we spawn during the build.
+    fd = os.open(lock_path, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o644)
     try:
         _fcntl.flock(fd, _fcntl.LOCK_EX)  # blocks until acquired
         yield
