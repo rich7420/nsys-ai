@@ -95,7 +95,7 @@ def _build_lock(cache_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 12  # bumped: sync.parquet now includes deviceId for per-rank sync attribution
+_CACHE_VERSION = 14  # bumped: added nvtx_high.parquet (aten::* filtered subset) + ORDER BY on time-keyed exports
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
@@ -288,6 +288,12 @@ _ALIASES: dict[str, list[str]] = {
         "CUPTI_ACTIVITY_KIND_KERNEL_V3",
     ],
     "nvtx": ["NVTX_EVENTS"],
+    # NOTE: `nvtx_high` is NOT aliased here on purpose. It is a filtered subset
+    # of `nvtx` (aten::* / cudaLaunch% / cudaMemcpy% removed). When the cache
+    # provides nvtx_high.parquet, the view is created directly via the parquet
+    # glob loop in open_cached_db(). Skills should probe for its existence and
+    # fall back to `nvtx` when absent — never let _create_existing_alias_views
+    # silently turn `nvtx_high` into a slow scan over the full table.
     "runtime": [
         "CUPTI_ACTIVITY_KIND_RUNTIME",
         "CUPTI_ACTIVITY_KIND_RUNTIME_V2",
@@ -334,6 +340,13 @@ def _configure_duckdb_analytics_session(db: duckdb.DuckDBPyConnection) -> None:
         pass
     try:
         db.execute("SET enable_progress_bar = false")
+    except duckdb.Error:
+        pass
+    # Cache Parquet file metadata across queries within this session — every
+    # skill that reads the same parquet pays the metadata-parse cost only once.
+    # https://duckdb.org/docs/current/configuration/pragmas
+    try:
+        db.execute("PRAGMA enable_object_cache")
     except duckdb.Error:
         pass
     raw = os.environ.get("NSYS_AI_DUCKDB_THREADS", "").strip()
@@ -387,6 +400,49 @@ def _should_defer_nvtx_kernel_map(sqlite_path: str) -> bool:
         return size_mb >= threshold_mb
 
     return False
+
+
+def _order_clause_for(
+    view_name: str,
+    db: duckdb.DuckDBPyConnection,
+    table_ref: str,
+    has_device_col: bool,
+) -> str:
+    """Return an ORDER BY clause that lets DuckDB zonemaps prune time / device filters.
+
+    Returns an empty string for tables where ordering doesn't help (small lookup
+    tables, payload schemas, etc.).
+
+    Each ordering is chosen so the leading column is the most common filter:
+      - deviceId-scoped tables → ORDER BY deviceId, start
+      - per-thread runtime/nvtx → ORDER BY globalTid, start
+      - time-only event streams → ORDER BY start
+
+    All ordering keys are wrapped in ``TRY_CAST(... AS BIGINT)``: the SQLite
+    attach in ``_build_cache_into`` falls back to ``sqlite_all_varchar=true``
+    on some Nsight schemas, which would make these numeric columns VARCHAR
+    and turn ORDER BY into lexicographic sort (``'9999'`` after ``'10000'``)
+    — defeating the zonemap intent. ``TRY_CAST`` is a no-op when the column
+    is already integer-typed.
+    """
+    plan: dict[str, list[str]] = {
+        "runtime": ["globalTid", "start"],
+        "memcpy": ["deviceId", "start"],
+        "memset": ["deviceId", "start"],
+        "sync": ["deviceId", "start"] if has_device_col else ["start"],
+        "overhead": ["start"],
+        "profiler_overhead": ["start"],
+        "composite_events": ["start"],
+    }
+    cols = plan.get(view_name)
+    if not cols:
+        return ""
+    # Drop any column that doesn't exist on this particular nsys export variant.
+    present = [c for c in cols if _table_has_column(db, table_ref, c)]
+    if not present:
+        return ""
+    cast = ", ".join(f'TRY_CAST("{c}" AS BIGINT)' for c in present)
+    return f"ORDER BY {cast}"
 
 
 def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
@@ -459,6 +515,13 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
             sys.stderr.flush()
 
         # ── Export pre-joined kernels table ────────────────────────────────
+        # ORDER BY (deviceId, start) is critical: it lets DuckDB's parquet
+        # zonemaps prune row groups for both `-p device=N` filters and
+        # `--trim S E` time-range filters. Without explicit ordering,
+        # row-group min/max ranges overlap and pruning is ineffective.
+        # See: https://duckdb.org/docs/current/guides/performance/indexing
+        # TRY_CAST guards against the `sqlite_all_varchar=true` attach
+        # fallback, which would otherwise give lexicographic ordering.
         kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
         if kernel_table:
             _progress("kernels.parquet")
@@ -475,6 +538,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                     FROM src.{kernel_table} k
                     LEFT JOIN src.StringIds s ON k.shortName = s.id
                     LEFT JOIN src.StringIds d ON k.demangledName = d.id
+                    ORDER BY TRY_CAST(k.deviceId AS BIGINT), TRY_CAST(k.start AS BIGINT)
                 ) TO '{_safe_path(cache_dir / "kernels.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
 
@@ -483,6 +547,19 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         if nvtx_table:
             _progress("nvtx.parquet")
             _export_nvtx_with_blobs(sqlite_path, nvtx_table, cache_dir)
+            # nvtx_high.parquet: aten::%/cudaLaunch%/cudaMemcpy% filtered out.
+            # ~95% of NVTX rows are aten:: on typical PyTorch traces, so this
+            # ~20× smaller table is what most NVTX-attribution skills should
+            # read. Skipping is harmless — skills probe for the view and fall
+            # back to the full `nvtx` view when absent.
+            try:
+                _build_nvtx_high(db, cache_dir)
+            except duckdb.Error as exc:
+                log.warning(
+                    "nvtx_high.parquet build failed (%s); NVTX skills will use "
+                    "full nvtx.parquet (slower).",
+                    exc,
+                )
 
         for view_name, src_name in _BASE_TABLES:
             actual = _find_table(src_tables, src_name)
@@ -492,20 +569,29 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                 # Legacy Nsight exports may lack `deviceId` on synchronization
                 # tables. Drop it from the projection rather than failing the
                 # cache build — sync_cost_analysis degrades to single-device mode.
+                has_device_col = True
                 if (
                     projection != "*"
                     and actual.startswith("CUPTI_ACTIVITY_KIND_SYNCHRONIZATION")
                     and not _table_has_column(db, f"src.{actual}", "deviceId")
                 ):
                     projection = projection.replace("deviceId, ", "")
+                    has_device_col = False
+                order_clause = _order_clause_for(view_name, db, f"src.{actual}", has_device_col)
                 if projection == "*":
-                    db.execute(f"""
-                        COPY src.{actual}
-                        TO '{_safe_path(cache_dir / f"{view_name}.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
-                    """)
+                    if order_clause:
+                        db.execute(f"""
+                            COPY (SELECT * FROM src.{actual} {order_clause})
+                            TO '{_safe_path(cache_dir / f"{view_name}.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
+                        """)
+                    else:
+                        db.execute(f"""
+                            COPY src.{actual}
+                            TO '{_safe_path(cache_dir / f"{view_name}.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
+                        """)
                 else:
                     db.execute(f"""
-                        COPY (SELECT {projection} FROM src.{actual})
+                        COPY (SELECT {projection} FROM src.{actual} {order_clause})
                         TO '{_safe_path(cache_dir / f"{view_name}.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
                     """)
 
@@ -824,6 +910,9 @@ def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) 
         binary_expr = "hex(n.binaryData) AS binaryData" if has_binary else "CAST(NULL AS VARCHAR) AS binaryData"
         json_text_expr = "n.jsonText AS jsonText" if has_json_text else "CAST(NULL AS VARCHAR) AS jsonText"
         text_expr = "n.text" if has_text else "CAST(NULL AS VARCHAR)"
+        # NVTX is most commonly filtered by (globalTid, time-window). Ordering
+        # by (globalTid, start) lets DuckDB zonemap-prune for per-thread time
+        # queries (e.g. host-sync attribution, iteration_timing).
         if has_textid:
             db.execute(f"""
                 COPY (
@@ -849,6 +938,7 @@ def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) 
                            {_expr("textId", "BIGINT")}
                     FROM srcv.{nvtx_table} n
                     LEFT JOIN srcv.StringIds s ON n.textId = s.id
+                    ORDER BY TRY_CAST(n.globalTid AS BIGINT), TRY_CAST(n.start AS BIGINT)
                 ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
         else:
@@ -874,10 +964,72 @@ def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) 
                            {binary_expr},
                            {text_expr} AS text
                     FROM srcv.{nvtx_table} n
+                    ORDER BY TRY_CAST(n.globalTid AS BIGINT), TRY_CAST(n.start AS BIGINT)
                 ) TO '{_safe_path(cache_dir / "nvtx.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
     finally:
         db.close()
+
+
+# Prefix patterns that mark NVTX rows as "op-level noise" — kept out of
+# nvtx_high.parquet. The filter is intentionally narrow: anything *not*
+# matching these prefixes is preserved, so framework-, layer-, and
+# distributed-comm-level ranges (stage::*, FSDP::*, FlashAttn*, AllToAll4D,
+# nccl:*, transformer_blocks/*, record_param_comms, …) all survive.
+#
+# Skills that need aten::item / aten::_local_scalar_dense (e.g.
+# host_sync_parent_ranges, §5.7 Step 1) must query the full `nvtx` view —
+# never `nvtx_high`.
+#
+# Patterns are inlined as SQL string literals in _build_nvtx_high(); the
+# assertion below blocks any future addition that would break that
+# splicing or open an injection seam.
+_NVTX_HIGH_EXCLUDE_PATTERNS: tuple[str, ...] = (
+    "aten::%",
+    "cudaLaunch%",
+    "cudaMemcpy%",
+)
+# Raise (not assert) so the check survives `python -O`; asserts get stripped.
+_bad_patterns = [p for p in _NVTX_HIGH_EXCLUDE_PATTERNS if "'" in p or "\\" in p]
+if _bad_patterns:
+    raise ValueError(
+        "nvtx_high exclusion patterns must not contain single quotes or "
+        f"backslashes (offending: {_bad_patterns}). The patterns are inlined "
+        "as SQL string literals in _build_nvtx_high()."
+    )
+del _bad_patterns
+
+
+def _build_nvtx_high(db: duckdb.DuckDBPyConnection, cache_dir: Path) -> None:
+    """Write nvtx_high.parquet — nvtx.parquet minus op-level noise.
+
+    On profiles where ~95% of NVTX events are ``aten::*`` (typical PyTorch
+    traces), this shrinks the input set for downstream IEJoin operations
+    (``nvtx_kernel_map`` build, ``nvtx_layer_breakdown`` slow path) by ~20×.
+
+    Preserves the same (globalTid, start) sort as nvtx.parquet so DuckDB
+    zonemaps stay effective.
+    """
+    src = cache_dir / "nvtx.parquet"
+    dst = cache_dir / "nvtx_high.parquet"
+    if not src.is_file():
+        return
+
+    src_path = _safe_path(src)
+    dst_path = _safe_path(dst)
+    # Build the filter as a single NOT LIKE chain so DuckDB can push it down
+    # into the Parquet scan (no full materialisation before the filter).
+    exclusions = " AND ".join(
+        f"text NOT LIKE '{pat}'" for pat in _NVTX_HIGH_EXCLUDE_PATTERNS
+    )
+    db.execute(f"""
+        COPY (
+            SELECT *
+            FROM read_parquet('{src_path}')
+            WHERE text IS NOT NULL AND {exclusions}
+            ORDER BY globalTid, start
+        ) TO '{dst_path}' (FORMAT PARQUET, COMPRESSION ZSTD)
+    """)
 
 
 def _build_nvtx_kernel_map(
@@ -909,6 +1061,15 @@ def _build_nvtx_kernel_map(
     kp = cache_dir / "kernels.parquet"
     rp = cache_dir / "runtime.parquet"
     np = cache_dir / "nvtx.parquet"
+    # IEJoin source must be the full nvtx.parquet, NOT nvtx_high.parquet.
+    # nvtx_kernel_map is the canonical "kernel → enclosing NVTX range" mapping
+    # used by attribute_kernels_to_nvtx() and downstream skills via the fast
+    # path. Using a filtered source would silently drop kernels whose only
+    # enclosing ranges are aten::* — e.g. emit_nvtx-style PyTorch traces with
+    # no higher-level wrappers — and downstream callers won't fall back to
+    # full nvtx when nvtx_kernel_map exists but is empty/incomplete.
+    # The slow path in nvtx_layer_breakdown still benefits from nvtx_high
+    # (see _pick_nvtx_view in that file).
     if not (kp.is_file() and rp.is_file() and np.is_file()):
         log.warning("Parquet prerequisites missing for nvtx_kernel_map; using Python fallback")
         _build_nvtx_kernel_map_python(db, src_tables, cache_dir, sqlite_path)

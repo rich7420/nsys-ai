@@ -24,6 +24,28 @@ from nsys_ai.connection import (
 
 from ..base import Skill, SkillParam
 
+
+def _pick_nvtx_view(conn, fallback: str) -> str:
+    """Return ``"nvtx_high"`` when the filtered subset is present and non-empty.
+
+    Skills that perform NVTX→kernel attribution scale with NVTX row count.
+    On typical PyTorch traces, ~95 % of NVTX rows are ``aten::*`` op-level
+    events that we strip into ``nvtx_high.parquet`` at cache build time;
+    using that subset shrinks the IEJoin substantially.
+
+    Fall back to ``fallback`` (usually the full ``nvtx`` view) when:
+      * the high-level view does not exist (older caches, parquetdir backend)
+      * the high-level view is empty — the profile's NVTX text happened to
+        match every exclusion prefix, so a query against ``nvtx_high`` would
+        return ``[]`` while a query against full ``nvtx`` would still
+        attribute kernels to enclosing ``aten::*`` ranges.
+    """
+    try:
+        probe = conn.execute("SELECT 1 FROM nvtx_high LIMIT 1").fetchone()
+    except DB_ERRORS:
+        return fallback
+    return "nvtx_high" if probe is not None else fallback
+
 # Compact vs full output (CLI --report removed; skills still accept -p report=…).
 REPORT_FULL = "full"
 REPORT_COMPACT = "compact"
@@ -120,7 +142,7 @@ def _execute(conn, **kwargs):
             tables = adapter.resolve_activity_tables()
             kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
             runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
-            nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+            nvtx_table = _pick_nvtx_view(conn, fallback=tables.get("nvtx", "NVTX_EVENTS"))
             has_textid = adapter.detect_nvtx_text_id()
             if has_textid:
                 text_expr = "COALESCE(n.text, ns.value)"
@@ -659,7 +681,7 @@ def _execute(conn, **kwargs):
                     tables = adapter.resolve_activity_tables()
                     kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
                     runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
-                    nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
+                    nvtx_table = _pick_nvtx_view(conn, fallback=tables.get("nvtx", "NVTX_EVENTS"))
                     kr_where = ""
                     nvtx_where = ""
                     params_k = []
