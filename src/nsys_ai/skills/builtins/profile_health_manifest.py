@@ -38,8 +38,121 @@ def _safe_skill_run(skill_name: str, conn, **kwargs):
         return []
 
 
+# Threshold past which a no-trim manifest is auto-narrowed to a
+# representative window. Below this, the full scan is fast enough that
+# sub-skills (nvtx_layer_breakdown IEJoin, root_cause_matcher, …) won't
+# blow past their soft budgets even on a multi-GPU export.
+_AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS = 120 * 10**9   # 120 s
+# Target width of the auto-selected window. Picked to be (a) large enough
+# to capture at least a few steady-state iterations of any DiT / transformer
+# block, (b) small enough that a 15 M-row NVTX IEJoin completes in seconds.
+_AUTO_TRIM_TARGET_WINDOW_NS = 20 * 10**9             # 20 s
+
+
+def _auto_select_trim_window(prof, conn) -> tuple[int, int] | None:
+    """Pick a representative steady-state window for a long profile.
+
+    Returns ``(start_ns, end_ns)`` to feed into sub-skills as
+    ``trim_start_ns`` / ``trim_end_ns``, or ``None`` when no trim is
+    needed (profile span below threshold) or no signal is available.
+
+    Strategy:
+      1. If profile span ≤ ``_AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS``,
+         return None — the full manifest will fit a normal turn budget.
+      2. Otherwise, find the top non-`aten::*` NVTX range name with
+         ≥ 3 instances (iteration / stage marker) and pick the *middle*
+         instance — skips index-0 JIT warmup. If the chosen instance is
+         wider than ``_AUTO_TRIM_TARGET_WINDOW_NS``, trim further to the
+         middle of that range.
+      3. If no qualifying NVTX range exists, fall back to the middle
+         ``_AUTO_TRIM_TARGET_WINDOW_NS`` of the profile span.
+
+    Failures are absorbed — auto-trim is best-effort; the caller proceeds
+    untrimmed when this returns None or raises.
+    """
+    import sqlite3
+
+    import duckdb
+
+    try:
+        start_ns, end_ns = prof.meta.time_range
+    except Exception:
+        return None
+    span_ns = (end_ns or 0) - (start_ns or 0)
+    if span_ns < _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS:
+        return None
+
+    # Query the highest-volume non-op-level NVTX range and order its
+    # instances by start so we can pick the middle one. The CTE form
+    # works on both `nvtx_high` and full `nvtx` (DuckDB cache view) and
+    # on raw `NVTX_EVENTS` (SQLite fallback); _duckdb_query translates
+    # the [end] dialect when needed.
+    nvtx_table = "nvtx_high"
+    try:
+        prof._duckdb_query("SELECT 1 FROM nvtx_high LIMIT 1")
+    except (sqlite3.Error, duckdb.Error):
+        # Fall back to full nvtx; the explicit aten:: exclusion below
+        # keeps the query meaningful even without the high-level view.
+        nvtx_table = "nvtx"
+        try:
+            prof._duckdb_query("SELECT 1 FROM nvtx LIMIT 1")
+        except (sqlite3.Error, duckdb.Error):
+            nvtx_table = "NVTX_EVENTS"
+
+    sql = f"""
+        WITH ranged AS (
+            SELECT text, start, [end]
+            FROM {nvtx_table}
+            WHERE text IS NOT NULL
+              AND [end] > start
+              AND text NOT LIKE 'aten::%'
+              AND text NOT LIKE 'cudaLaunch%'
+              AND text NOT LIKE 'cudaMemcpy%'
+        )
+        SELECT text, start, [end] FROM ranged
+        WHERE text = (
+            SELECT text FROM ranged
+            GROUP BY text
+            HAVING COUNT(*) >= 3
+            ORDER BY SUM([end] - start) DESC, text ASC
+            LIMIT 1
+        )
+        ORDER BY start
+    """
+    try:
+        rows = prof._duckdb_query(sql)
+    except (sqlite3.Error, duckdb.Error) as exc:
+        _log.debug("auto-trim NVTX query failed: %s", exc)
+        rows = []
+
+    if rows:
+        # Skip the first instance (JIT warmup / one-time setup cost) and
+        # pick the middle of what remains so we land in steady state.
+        idx = max(1, len(rows) // 2)
+        if idx >= len(rows):
+            idx = len(rows) - 1
+        chosen = rows[idx]
+        c_start = int(chosen["start"])
+        c_end = int(chosen["end"])
+        # Trim very wide stage ranges down to a 20 s slice in their middle
+        # so sub-skills still get steady-state behaviour but don't grind.
+        if c_end - c_start > _AUTO_TRIM_TARGET_WINDOW_NS:
+            mid = (c_start + c_end) // 2
+            half = _AUTO_TRIM_TARGET_WINDOW_NS // 2
+            return (mid - half, mid + half)
+        return (c_start, c_end)
+
+    # No usable NVTX iteration marker — take the middle 20 s of the
+    # profile so we at least avoid head-of-trace JIT and tail teardown.
+    mid = (start_ns + end_ns) // 2
+    half = _AUTO_TRIM_TARGET_WINDOW_NS // 2
+    return (mid - half, mid + half)
+
+
 def _execute(conn, **kwargs):
     """Build a compact profile health manifest."""
+    import os
+
     from ...profile import Profile
 
     device = int(kwargs.get("device", 0))
@@ -50,9 +163,37 @@ def _execute(conn, **kwargs):
     for k in ("trim_start_ns", "trim_end_ns"):
         if kwargs.get(k) is not None:
             trim_kwargs[k] = kwargs[k]
+    explicit_trim = bool(trim_kwargs)
 
     # ── 1. Profile metadata ──────────────────────────────────────
     prof = Profile._from_conn(conn)
+
+    # ── 1a. Auto-trim for very long profiles ────────────────────
+    # Without this guard, manifest on a multi-GB / 10-minute profile
+    # melts on the NVTX×kernel IEJoin (15M+ rows) and `iteration_timing`
+    # full-table scans. Opt out with NSYS_AI_MANIFEST_AUTO_TRIM=0.
+    auto_trim_meta: dict | None = None
+    if not explicit_trim and os.environ.get("NSYS_AI_MANIFEST_AUTO_TRIM", "1") != "0":
+        try:
+            picked = _auto_select_trim_window(prof, conn)
+        except Exception as exc:  # noqa: BLE001 — best-effort, never block manifest
+            _log.debug("manifest auto-trim selection failed: %s", exc, exc_info=True)
+            picked = None
+        if picked is not None:
+            t0, t1 = picked
+            trim_kwargs = {"trim_start_ns": int(t0), "trim_end_ns": int(t1)}
+            auto_trim_meta = {
+                "applied": True,
+                "trim_start_ns": int(t0),
+                "trim_end_ns": int(t1),
+                "window_ms": round((t1 - t0) / 1e6, 1),
+            }
+            _log.info(
+                "manifest auto-trimmed to %.2fs–%.2fs (%.1fs window) on long profile",
+                t0 / 1e9,
+                t1 / 1e9,
+                (t1 - t0) / 1e9,
+            )
     # Prefer the GPU name for the requested device, if available.
     gpu_name = "unknown"
     gpu_info = getattr(prof.meta, "gpu_info", None)
@@ -92,6 +233,8 @@ def _execute(conn, **kwargs):
         "overhead_pct": overhead_pct,
         "overhead_pct_raw": overhead_pct_raw,
     }
+    if auto_trim_meta is not None:
+        data_quality["auto_trim"] = auto_trim_meta
 
     # ── 2. Top kernels (compact: top 5 only) ─────────────────────
     trim_tuple = None

@@ -88,6 +88,138 @@ class TestManifestExecute:
         assert isinstance(dq["overhead_pct"], (int, float))
 
 
+class TestManifestAutoTrim:
+    """Auto-trim picks a representative window on long profiles so the
+    manifest doesn't grind through 10-minute / 2 GB exports.
+
+    Boundary: profiles shorter than _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS
+    pass through untouched; longer profiles get the middle steady-state
+    instance of the top non-aten:: NVTX range, or the middle 20 s as a
+    fallback when no NVTX iteration markers are present.
+    """
+
+    def _make_profile_stub(self, span_ns: int, nvtx_rows: list[tuple]):
+        """Lightweight Profile + connection pair sufficient for auto-trim."""
+        from types import SimpleNamespace
+
+        # The auto-trim selector only reaches for `prof.meta.time_range`
+        # and `prof._duckdb_query`. Stubbing both decouples the test from
+        # the rest of the Profile machinery.
+        captured_queries: list[str] = []
+
+        def fake_query(sql, params=None):
+            captured_queries.append(sql)
+            sl = sql.lower()
+            # Probe queries — let the selector think nvtx exists.
+            if "from nvtx_high" in sl and "limit 1" in sl and "where" not in sl.split("from nvtx_high")[1].split("limit")[0]:
+                return [{"1": 1}]
+            # The real CTE query — return the NVTX rows seeded by the test
+            # if they match the expected schema (text, start, end).
+            if "from ranged" in sl:
+                # nvtx_rows is the post-filter set (no aten::*).
+                return [{"text": r[0], "start": r[1], "end": r[2]} for r in nvtx_rows]
+            return []
+
+        prof = SimpleNamespace(
+            meta=SimpleNamespace(time_range=(0, span_ns)),
+            _duckdb_query=fake_query,
+        )
+        return prof, captured_queries
+
+    def test_short_profile_returns_none(self):
+        """Profile span below threshold → no auto-trim."""
+        from nsys_ai.skills.builtins.profile_health_manifest import (
+            _auto_select_trim_window,
+        )
+
+        prof, _ = self._make_profile_stub(span_ns=30 * 10**9, nvtx_rows=[])
+        assert _auto_select_trim_window(prof, conn=None) is None
+
+    def test_long_profile_picks_middle_nvtx_instance(self):
+        """3 stage instances → middle one (skip JIT warmup at idx 0)."""
+        from nsys_ai.skills.builtins.profile_health_manifest import (
+            _auto_select_trim_window,
+        )
+
+        # Three short ranges (each < 20 s) so the selector returns them
+        # verbatim rather than slicing to a 20 s sub-window.
+        nvtx_rows = [
+            # (text, start_ns, end_ns)
+            ("stage::DenoisingStage", 100_000_000_000, 110_000_000_000),
+            ("stage::DenoisingStage", 200_000_000_000, 210_000_000_000),
+            ("stage::DenoisingStage", 300_000_000_000, 310_000_000_000),
+        ]
+        prof, _ = self._make_profile_stub(span_ns=500 * 10**9, nvtx_rows=nvtx_rows)
+        picked = _auto_select_trim_window(prof, conn=None)
+        assert picked is not None
+        # Index 1 (the middle of 3, skipping idx 0)
+        assert picked == (200_000_000_000, 210_000_000_000)
+
+    def test_long_profile_trims_wide_range_to_middle_20s(self):
+        """Range wider than 20 s gets narrowed to its middle 20 s."""
+        from nsys_ai.skills.builtins.profile_health_manifest import (
+            _AUTO_TRIM_TARGET_WINDOW_NS,
+            _auto_select_trim_window,
+        )
+
+        # One 200 s range × 3 instances; middle instance spans
+        # 400 s → 600 s. Auto-trim should return middle ± 10 s = 490-510 s.
+        nvtx_rows = [
+            ("stage::DenoisingStage", 100_000_000_000, 300_000_000_000),
+            ("stage::DenoisingStage", 400_000_000_000, 600_000_000_000),
+            ("stage::DenoisingStage", 700_000_000_000, 900_000_000_000),
+        ]
+        prof, _ = self._make_profile_stub(span_ns=1000 * 10**9, nvtx_rows=nvtx_rows)
+        picked = _auto_select_trim_window(prof, conn=None)
+        assert picked is not None
+        lo, hi = picked
+        assert hi - lo == _AUTO_TRIM_TARGET_WINDOW_NS
+        # Centered on the middle of (400e9, 600e9) = 500e9
+        assert lo == 500_000_000_000 - _AUTO_TRIM_TARGET_WINDOW_NS // 2
+        assert hi == 500_000_000_000 + _AUTO_TRIM_TARGET_WINDOW_NS // 2
+
+    def test_long_profile_no_nvtx_falls_back_to_middle(self):
+        """No qualifying NVTX iteration markers → middle 20 s of span."""
+        from nsys_ai.skills.builtins.profile_health_manifest import (
+            _AUTO_TRIM_TARGET_WINDOW_NS,
+            _auto_select_trim_window,
+        )
+
+        prof, _ = self._make_profile_stub(span_ns=400 * 10**9, nvtx_rows=[])
+        picked = _auto_select_trim_window(prof, conn=None)
+        assert picked is not None
+        lo, hi = picked
+        assert hi - lo == _AUTO_TRIM_TARGET_WINDOW_NS
+        # Span midpoint is 200 s; window is [190 s, 210 s]
+        assert lo == 200 * 10**9 - _AUTO_TRIM_TARGET_WINDOW_NS // 2
+        assert hi == 200 * 10**9 + _AUTO_TRIM_TARGET_WINDOW_NS // 2
+
+    def test_explicit_trim_disables_auto_trim(self, minimal_nsys_conn, manifest_skill):
+        """When the caller passes trim_start_ns / trim_end_ns, the manifest
+        must honour it and not inject an auto-trim window."""
+        rows = manifest_skill.execute(
+            minimal_nsys_conn,
+            device=0,
+            trim_start_ns=0,
+            trim_end_ns=10_000_000,
+        )
+        dq = rows[0]["data_quality"]
+        assert "auto_trim" not in dq
+
+    def test_short_profile_no_auto_trim_in_manifest(self, minimal_nsys_conn, manifest_skill):
+        """Fixture profile spans ~24 ms — well below threshold; no auto-trim."""
+        rows = manifest_skill.execute(minimal_nsys_conn, device=0)
+        dq = rows[0]["data_quality"]
+        assert "auto_trim" not in dq
+
+    def test_env_var_disables_auto_trim(self, monkeypatch, minimal_nsys_conn, manifest_skill):
+        """NSYS_AI_MANIFEST_AUTO_TRIM=0 opts out even on long profiles."""
+        monkeypatch.setenv("NSYS_AI_MANIFEST_AUTO_TRIM", "0")
+        rows = manifest_skill.execute(minimal_nsys_conn, device=0)
+        dq = rows[0]["data_quality"]
+        assert "auto_trim" not in dq
+
+
 class TestManifestFormat:
     def test_format_includes_header(self, minimal_nsys_conn, manifest_skill):
         rows = manifest_skill.execute(minimal_nsys_conn, device=0)
