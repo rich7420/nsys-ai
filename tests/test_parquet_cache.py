@@ -2,11 +2,83 @@
 
 import json
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from nsys_ai import parquet_cache
+
+# Minimal schema reused by tests that need to seed custom NVTX rows. Mirrors
+# the production CUPTI/NVTX layout; intentionally narrow — just enough for
+# build_cache() to produce kernels.parquet, runtime.parquet, nvtx.parquet,
+# and nvtx_high.parquet.
+_TEST_SQLITE_SCHEMA = """
+    CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
+    CREATE TABLE TARGET_INFO_GPU (
+        id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT DEFAULT '',
+        totalMemory INTEGER DEFAULT 0, smCount INTEGER DEFAULT 0,
+        chipName TEXT DEFAULT '', memoryBandwidth INTEGER DEFAULT 0
+    );
+    CREATE TABLE TARGET_INFO_CUDA_DEVICE (
+        gpuId INTEGER, cudaId INTEGER, pid INTEGER DEFAULT 0,
+        uuid TEXT DEFAULT '', numMultiprocessors INTEGER DEFAULT 0
+    );
+    CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
+        globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0,
+        streamId INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+        start INTEGER NOT NULL, end INTEGER NOT NULL,
+        shortName INTEGER NOT NULL, demangledName INTEGER DEFAULT 0,
+        gridX INTEGER DEFAULT 1, gridY INTEGER DEFAULT 1, gridZ INTEGER DEFAULT 1,
+        blockX INTEGER DEFAULT 1, blockY INTEGER DEFAULT 1, blockZ INTEGER DEFAULT 1
+    );
+    CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
+        globalTid INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
+        start INTEGER NOT NULL, end INTEGER NOT NULL, nameId INTEGER DEFAULT 0
+    );
+    CREATE TABLE NVTX_EVENTS (
+        globalTid INTEGER DEFAULT 0, start INTEGER NOT NULL,
+        end INTEGER DEFAULT -1, text TEXT DEFAULT '',
+        eventType INTEGER DEFAULT 59, rangeId INTEGER DEFAULT 0,
+        textId INTEGER DEFAULT NULL
+    );
+"""
+
+_TEST_SQLITE_SEED_FIXED = """
+    INSERT INTO StringIds VALUES (1, 'gemm_kernel');
+    INSERT INTO TARGET_INFO_GPU VALUES
+        (0, 'Test', '', 8589934592, 108, 'TestChip', 0);
+    INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, '', 108);
+    INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
+        (100, 0, 7, 1, 1000000, 2000000, 1, 1, 1, 1, 1, 1, 1, 1);
+    INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES
+        (100, 1, 900000, 1000000, 0);
+"""
+
+
+def _make_nsys_sqlite(tmp_path: Path, filename: str, nvtx_rows: list[tuple]) -> Path:
+    """Create a minimal nsys-style sqlite for nvtx_high-related tests.
+
+    Includes one kernel + matching runtime row, plus caller-supplied NVTX
+    rows. Returns the file path. ``nvtx_rows`` items are
+    ``(globalTid, start, end, text, eventType, rangeId)`` tuples — keep
+    ranges loose enough that the single kernel lands inside them when the
+    test cares about attribution.
+    """
+    db_path = tmp_path / filename
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(_TEST_SQLITE_SCHEMA)
+        conn.executescript(_TEST_SQLITE_SEED_FIXED)
+        conn.executemany(
+            "INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            nvtx_rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
 
 
 class TestCacheValidation:
@@ -107,143 +179,56 @@ class TestBuildAndOpen:
 
     def test_nvtx_high_filters_aten_events(self, tmp_path):
         """nvtx_high.parquet should exclude aten::*/cudaLaunch%/cudaMemcpy%."""
-        import sqlite3
+        import duckdb
 
-        # Build a tiny sqlite with a mix of high-level + aten:: NVTX rows so we
-        # can verify the filter behaviour deterministically.
-        db_path = tmp_path / "phase4_nvtx_high.sqlite"
-        conn = sqlite3.connect(str(db_path))
-        conn.executescript("""
-            CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
-            CREATE TABLE TARGET_INFO_GPU (
-                id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT DEFAULT '',
-                totalMemory INTEGER DEFAULT 0, smCount INTEGER DEFAULT 0,
-                chipName TEXT DEFAULT '', memoryBandwidth INTEGER DEFAULT 0
-            );
-            CREATE TABLE TARGET_INFO_CUDA_DEVICE (
-                gpuId INTEGER, cudaId INTEGER, pid INTEGER DEFAULT 0,
-                uuid TEXT DEFAULT '', numMultiprocessors INTEGER DEFAULT 0
-            );
-            CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
-                globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0,
-                streamId INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
-                start INTEGER NOT NULL, end INTEGER NOT NULL,
-                shortName INTEGER NOT NULL, demangledName INTEGER DEFAULT 0,
-                gridX INTEGER DEFAULT 1, gridY INTEGER DEFAULT 1, gridZ INTEGER DEFAULT 1,
-                blockX INTEGER DEFAULT 1, blockY INTEGER DEFAULT 1, blockZ INTEGER DEFAULT 1
-            );
-            CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
-                globalTid INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
-                start INTEGER NOT NULL, end INTEGER NOT NULL, nameId INTEGER DEFAULT 0
-            );
-            CREATE TABLE NVTX_EVENTS (
-                globalTid INTEGER DEFAULT 0, start INTEGER NOT NULL,
-                end INTEGER DEFAULT -1, text TEXT DEFAULT '',
-                eventType INTEGER DEFAULT 59, rangeId INTEGER DEFAULT 0,
-                textId INTEGER DEFAULT NULL
-            );
-            INSERT INTO StringIds VALUES (1, 'k_x');
-            INSERT INTO TARGET_INFO_GPU VALUES
-                (0, 'Test', '', 8589934592, 108, 'TestChip', 0);
-            INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, '', 108);
-            INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
-                (100, 0, 7, 1, 1000, 2000, 1, 1, 1, 1, 1, 1, 1, 1);
-            INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (100, 1, 900, 1000, 0);
-            -- Mix of NVTX events: should keep / should drop
-            INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) VALUES
-                (100, 100, 5000, 'stage::DenoisingStage', 59, 0),    -- keep
-                (100, 200, 4000, 'FlashAttnFunc', 59, 1),            -- keep
-                (100, 300, 3500, 'nccl:all_to_all', 59, 2),          -- keep
-                (100, 400, 3000, 'aten::linear', 59, 3),             -- DROP
-                (100, 500, 2500, 'aten::layer_norm', 59, 4),         -- DROP
-                (100, 600, 2400, 'cudaLaunchKernel', 59, 5),         -- DROP
-                (100, 700, 2300, 'cudaMemcpyAsync', 59, 6);          -- DROP
-        """)
-        conn.close()
-
+        nvtx_rows = [
+            # (globalTid, start, end, text, eventType, rangeId)
+            (100, 100, 5000, "stage::DenoisingStage", 59, 0),   # keep
+            (100, 200, 4000, "FlashAttnFunc", 59, 1),           # keep
+            (100, 300, 3500, "nccl:all_to_all", 59, 2),         # keep
+            (100, 400, 3000, "aten::linear", 59, 3),            # DROP
+            (100, 500, 2500, "aten::layer_norm", 59, 4),        # DROP
+            (100, 600, 2400, "cudaLaunchKernel", 59, 5),        # DROP
+            (100, 700, 2300, "cudaMemcpyAsync", 59, 6),         # DROP
+        ]
+        db_path = _make_nsys_sqlite(tmp_path, "phase4_nvtx_high.sqlite", nvtx_rows)
         cache_dir = parquet_cache.build_cache(str(db_path))
         nvtx_high = cache_dir / "nvtx_high.parquet"
         assert nvtx_high.is_file(), "nvtx_high.parquet should be created"
 
-        import duckdb
         db = duckdb.connect()
         try:
-            rows = db.execute(f"""
-                SELECT text FROM read_parquet('{nvtx_high.as_posix()}')
-                ORDER BY text
-            """).fetchall()
+            rows = db.execute(
+                f"SELECT text FROM read_parquet('{nvtx_high.as_posix()}') ORDER BY text"
+            ).fetchall()
         finally:
             db.close()
 
-        kept = sorted(r[0] for r in rows)
-        assert kept == sorted(
+        assert sorted(r[0] for r in rows) == sorted(
             ["FlashAttnFunc", "nccl:all_to_all", "stage::DenoisingStage"]
-        ), f"unexpected nvtx_high rows: {kept}"
+        ), f"unexpected nvtx_high rows: {[r[0] for r in rows]}"
 
     def test_nvtx_high_empty_falls_back_in_layer_breakdown(self, tmp_path):
         """When nvtx_high.parquet exists but is empty (profile is all aten::*),
         nvtx_layer_breakdown should still return attribution by reading the
         full nvtx view instead of silently emitting [].
         """
-        import sqlite3
+        import duckdb
 
         from nsys_ai.skills.registry import get_skill
 
-        db_path = tmp_path / "all_aten.sqlite"
-        conn = sqlite3.connect(str(db_path))
-        # Schema is the same as the other test in this file; only the seed
-        # differs. NVTX rows are 100% aten::*, so nvtx_high will be empty
-        # but full nvtx will still enclose the kernel.
-        conn.executescript("""
-            CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT);
-            CREATE TABLE TARGET_INFO_GPU (
-                id INTEGER PRIMARY KEY, name TEXT, busLocation TEXT DEFAULT '',
-                totalMemory INTEGER DEFAULT 0, smCount INTEGER DEFAULT 0,
-                chipName TEXT DEFAULT '', memoryBandwidth INTEGER DEFAULT 0
-            );
-            CREATE TABLE TARGET_INFO_CUDA_DEVICE (
-                gpuId INTEGER, cudaId INTEGER, pid INTEGER DEFAULT 0,
-                uuid TEXT DEFAULT '', numMultiprocessors INTEGER DEFAULT 0
-            );
-            CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
-                globalPid INTEGER DEFAULT 0, deviceId INTEGER DEFAULT 0,
-                streamId INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
-                start INTEGER NOT NULL, end INTEGER NOT NULL,
-                shortName INTEGER NOT NULL, demangledName INTEGER DEFAULT 0,
-                gridX INTEGER DEFAULT 1, gridY INTEGER DEFAULT 1, gridZ INTEGER DEFAULT 1,
-                blockX INTEGER DEFAULT 1, blockY INTEGER DEFAULT 1, blockZ INTEGER DEFAULT 1
-            );
-            CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
-                globalTid INTEGER DEFAULT 0, correlationId INTEGER DEFAULT 0,
-                start INTEGER NOT NULL, end INTEGER NOT NULL, nameId INTEGER DEFAULT 0
-            );
-            CREATE TABLE NVTX_EVENTS (
-                globalTid INTEGER DEFAULT 0, start INTEGER NOT NULL,
-                end INTEGER DEFAULT -1, text TEXT DEFAULT '',
-                eventType INTEGER DEFAULT 59, rangeId INTEGER DEFAULT 0,
-                textId INTEGER DEFAULT NULL
-            );
-            INSERT INTO StringIds VALUES (1, 'gemm_kernel');
-            INSERT INTO TARGET_INFO_GPU VALUES
-                (0, 'Test', '', 8589934592, 108, 'TestChip', 0);
-            INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (0, 0, 100, '', 108);
-            INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES
-                (100, 0, 7, 1, 1000000, 2000000, 1, 1, 1, 1, 1, 1, 1, 1);
-            INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES
-                (100, 1, 900000, 1000000, 0);
-            -- Every NVTX row matches an exclusion prefix → nvtx_high is empty
-            INSERT INTO NVTX_EVENTS (globalTid, start, end, text, eventType, rangeId) VALUES
-                (100, 100000, 5000000, 'aten::linear', 59, 0),
-                (100, 200000, 4000000, 'aten::layer_norm', 59, 1);
-        """)
-        conn.close()
-
+        # Every NVTX row matches an exclusion prefix → nvtx_high will be empty
+        # but full nvtx will still enclose the kernel (correlationId 1 lives
+        # in [1_000_000, 2_000_000] and both ranges below cover that).
+        nvtx_rows = [
+            (100, 100_000, 5_000_000, "aten::linear", 59, 0),
+            (100, 200_000, 4_000_000, "aten::layer_norm", 59, 1),
+        ]
+        db_path = _make_nsys_sqlite(tmp_path, "all_aten.sqlite", nvtx_rows)
         cache_dir = parquet_cache.build_cache(str(db_path))
         nvtx_high = cache_dir / "nvtx_high.parquet"
         assert nvtx_high.is_file(), "nvtx_high.parquet should still be created"
 
-        # Confirm nvtx_high is empty for this seed
-        import duckdb
         check = duckdb.connect()
         try:
             n_high = check.execute(
@@ -253,15 +238,13 @@ class TestBuildAndOpen:
             check.close()
         assert n_high == 0, f"expected empty nvtx_high, got {n_high} rows"
 
-        # nvtx_layer_breakdown must fall back to full nvtx and attribute the
-        # kernel to one of the aten::* enclosing ranges.
+        # Fallback path: skill must still attribute the kernel to aten:: ranges.
         db = parquet_cache.open_cached_db(str(db_path))
         try:
             rows = get_skill("nvtx_layer_breakdown").execute(db, limit=10)
         finally:
             db.close()
         assert rows, "expected fallback to full nvtx to produce attribution"
-        # Filter out detection-meta sentinel that nvtx_layer_breakdown may emit
         data = [r for r in rows if not r.get("_detection_meta")]
         assert any(
             "aten::" in (r.get("nvtx_path") or r.get("leaf_text") or "")

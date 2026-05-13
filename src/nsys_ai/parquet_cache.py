@@ -971,11 +971,18 @@ def _export_nvtx_with_blobs(sqlite_path: str, nvtx_table: str, cache_dir: Path) 
 # Skills that need aten::item / aten::_local_scalar_dense (e.g.
 # host_sync_parent_ranges, §5.7 Step 1) must query the full `nvtx` view —
 # never `nvtx_high`.
-_NVTX_HIGH_EXCLUDE_PATTERNS = (
+#
+# Patterns are inlined as SQL string literals in _build_nvtx_high(); the
+# assertion below blocks any future addition that would break that
+# splicing or open an injection seam.
+_NVTX_HIGH_EXCLUDE_PATTERNS: tuple[str, ...] = (
     "aten::%",
     "cudaLaunch%",
     "cudaMemcpy%",
 )
+assert all(
+    "'" not in p and "\\" not in p for p in _NVTX_HIGH_EXCLUDE_PATTERNS
+), "nvtx_high exclusion patterns must not contain single quotes or backslashes"
 
 
 def _build_nvtx_high(db: duckdb.DuckDBPyConnection, cache_dir: Path) -> None:
