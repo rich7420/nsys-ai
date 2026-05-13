@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from nsys_ai import parquet_cache
 
 
@@ -142,6 +144,11 @@ class TestConcurrentBuild:
     296MB profile that meant ~10s of wasted ETL per duplicate runner.
     """
 
+    @pytest.mark.skipif(
+        parquet_cache._fcntl is None,
+        reason="build-lock degrades to no-op without POSIX fcntl; this assertion "
+        "only holds on platforms where the lock is real.",
+    )
     def test_concurrent_threads_only_build_once(self, minimal_nsys_db_path, monkeypatch):
         import threading
         import time
@@ -174,7 +181,10 @@ class TestConcurrentBuild:
 
         monkeypatch.setattr(parquet_cache, "_build_cache_into", counting_build_into)
 
-        results: list[Path | BaseException] = []
+        # Track caches and exceptions separately so a barrier timeout
+        # or any other error can't masquerade as "all paths succeeded".
+        caches: list[Path] = []
+        errors: list[BaseException] = []
         results_lock = threading.Lock()
 
         def runner() -> None:
@@ -183,10 +193,10 @@ class TestConcurrentBuild:
                 cache = parquet_cache.build_cache(str(minimal_nsys_db_path))
             except BaseException as e:  # pragma: no cover - defensive
                 with results_lock:
-                    results.append(e)
+                    errors.append(e)
                 return
             with results_lock:
-                results.append(cache)
+                caches.append(cache)
 
         threads = [threading.Thread(target=runner) for _ in range(num_threads)]
         for t in threads:
@@ -194,14 +204,16 @@ class TestConcurrentBuild:
         for t in threads:
             t.join(timeout=30)
 
-        assert len(results) == num_threads, "all threads must complete"
+        assert errors == [], f"runners raised: {errors!r}"
+        assert len(caches) == num_threads, (
+            f"all {num_threads} runners must complete; got {len(caches)}"
+        )
         assert call_count == 1, (
             f"_build_cache_into should run exactly once for {num_threads} "
             f"concurrent callers; got {call_count}"
         )
         # Every caller returns the same cache directory.
-        cache_dirs = {r for r in results if isinstance(r, Path)}
-        assert len(cache_dirs) == 1, f"all callers must agree on cache_dir; got {cache_dirs}"
+        assert len(set(caches)) == 1, f"all callers must agree on cache_dir; got {set(caches)}"
         assert parquet_cache.is_cache_valid(minimal_nsys_db_path) is True
 
 

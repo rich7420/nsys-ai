@@ -184,12 +184,23 @@ def build_cache(sqlite_path: str) -> Path:
     caller waits out the first, it returns the freshly-built cache
     without re-running the ETL.
 
+    The lock is *only* acquired when a build is actually needed; an
+    initial ``is_cache_valid`` fast-path return avoids opening the lock
+    file at all when the cache is already good. This matters for
+    read-only profile directories (NFS / read-only mounts) where the
+    cache is readable but the lock file cannot be created.
+
     Returns the cache directory path.
     """
     import shutil
     import tempfile
 
     cache_dir = _cache_dir_for(sqlite_path)
+    # Fast path: cache already valid — no lock file creation needed.
+    # Lets read-only profile directories work as long as the cache was
+    # built earlier (e.g. by a previous writable session).
+    if is_cache_valid(sqlite_path):
+        return cache_dir
     with _build_lock(cache_dir):
         # Double-checked locking: another process may have built the
         # cache while we were waiting on the lock. Skip redundant ETL.
