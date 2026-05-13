@@ -121,14 +121,17 @@ def _execute(conn, **kwargs):
             kernel_table = tables.get("kernel", "CUPTI_ACTIVITY_KIND_KERNEL")
             runtime_table = tables.get("runtime", "CUPTI_ACTIVITY_KIND_RUNTIME")
             # Prefer nvtx_high (aten::*/cudaLaunch% filtered out) when the
-            # cache provides it — IEJoin runs ~20× faster on typical PyTorch
-            # traces because op-level rows are dropped. Fall back to full
-            # nvtx if the high-level view is unavailable (older caches or
-            # non-cached profiles).
+            # cache provides it AND it actually has rows — IEJoin runs much
+            # faster on typical PyTorch traces because op-level rows are
+            # dropped. Fall back to full nvtx if the high-level view is
+            # unavailable (older caches, parquetdir backend) or empty (a
+            # profile whose every NVTX text matched the exclusion prefixes,
+            # in which case full nvtx would still produce attribution).
             nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
             try:
-                conn.execute("SELECT 1 FROM nvtx_high LIMIT 1")
-                nvtx_table = "nvtx_high"
+                probe = conn.execute("SELECT 1 FROM nvtx_high LIMIT 1").fetchone()
+                if probe is not None:
+                    nvtx_table = "nvtx_high"
             except DB_ERRORS:
                 pass
             has_textid = adapter.detect_nvtx_text_id()
@@ -673,8 +676,9 @@ def _execute(conn, **kwargs):
                     # see comment around the first occurrence.
                     nvtx_table = tables.get("nvtx", "NVTX_EVENTS")
                     try:
-                        conn.execute("SELECT 1 FROM nvtx_high LIMIT 1")
-                        nvtx_table = "nvtx_high"
+                        probe = conn.execute("SELECT 1 FROM nvtx_high LIMIT 1").fetchone()
+                        if probe is not None:
+                            nvtx_table = "nvtx_high"
                     except DB_ERRORS:
                         pass
                     kr_where = ""

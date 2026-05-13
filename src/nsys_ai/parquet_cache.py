@@ -95,7 +95,7 @@ def _build_lock(cache_dir: Path) -> Iterator[None]:
         os.close(fd)
 
 # Bump this when the cache schema changes (e.g., new columns, new tables).
-_CACHE_VERSION = 14  # bumped: added nvtx_high.parquet (aten::* filtered out, ~20x smaller) — drops nvtx_layer_breakdown slow path from 43s to ~2s on large profiles
+_CACHE_VERSION = 14  # bumped: added nvtx_high.parquet (aten::* filtered subset) + ORDER BY on time-keyed exports
 
 _SAFE_PARQUETDIR_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
