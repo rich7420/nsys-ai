@@ -199,7 +199,9 @@ class TestManifestAutoTrim:
         prof = SimpleNamespace(meta=SimpleNamespace())
         assert _auto_select_trim_window(prof) is None
 
-    def test_explicit_trim_disables_auto_trim_on_long_profile(self, monkeypatch):
+    def test_explicit_trim_disables_auto_trim_on_long_profile(
+        self, monkeypatch, minimal_nsys_conn, manifest_skill
+    ):
         """Even when span is over threshold, explicit trim_start_ns /
         trim_end_ns from the caller must not be replaced by auto-trim."""
         # Lower the threshold so the minimal fixture profile counts as
@@ -209,21 +211,12 @@ class TestManifestAutoTrim:
             "nsys_ai.skills.builtins.profile_health_manifest._AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS",
             0,
         )
-        skill = get_skill("profile_health_manifest")
-        # Build a tiny in-memory profile so we have a real Profile + conn.
-        import sqlite3
-
-        conn = sqlite3.connect(":memory:")
-        try:
-            from tests.conftest import _NSYS_SCHEMA_SQL, _NSYS_SEED_SQL
-
-            conn.executescript(_NSYS_SCHEMA_SQL)
-            conn.executescript(_NSYS_SEED_SQL)
-            rows = skill.execute(
-                conn, device=0, trim_start_ns=0, trim_end_ns=10_000_000
-            )
-        finally:
-            conn.close()
+        rows = manifest_skill.execute(
+            minimal_nsys_conn,
+            device=0,
+            trim_start_ns=0,
+            trim_end_ns=10_000_000,
+        )
         assert "auto_trim" not in rows[0]["data_quality"]
 
     def test_short_profile_no_auto_trim_in_manifest(self, minimal_nsys_conn, manifest_skill):
