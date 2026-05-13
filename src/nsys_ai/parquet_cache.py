@@ -980,9 +980,15 @@ _NVTX_HIGH_EXCLUDE_PATTERNS: tuple[str, ...] = (
     "cudaLaunch%",
     "cudaMemcpy%",
 )
-assert all(
-    "'" not in p and "\\" not in p for p in _NVTX_HIGH_EXCLUDE_PATTERNS
-), "nvtx_high exclusion patterns must not contain single quotes or backslashes"
+# Raise (not assert) so the check survives `python -O`; asserts get stripped.
+_bad_patterns = [p for p in _NVTX_HIGH_EXCLUDE_PATTERNS if "'" in p or "\\" in p]
+if _bad_patterns:
+    raise ValueError(
+        "nvtx_high exclusion patterns must not contain single quotes or "
+        f"backslashes (offending: {_bad_patterns}). The patterns are inlined "
+        "as SQL string literals in _build_nvtx_high()."
+    )
+del _bad_patterns
 
 
 def _build_nvtx_high(db: duckdb.DuckDBPyConnection, cache_dir: Path) -> None:
