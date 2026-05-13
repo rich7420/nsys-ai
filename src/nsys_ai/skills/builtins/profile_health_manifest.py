@@ -48,6 +48,18 @@ _AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS = 120 * 10**9   # 120 s
 # block, (b) small enough that a 15 M-row NVTX IEJoin completes in seconds.
 _AUTO_TRIM_TARGET_WINDOW_NS = 20 * 10**9             # 20 s
 
+# Values that turn NSYS_AI_MANIFEST_AUTO_TRIM off. Matches the parsing
+# of NSYS_AI_DEFER_NVTX_KERNEL_MAP in parquet_cache.py so users get
+# the same on/off semantics across env vars in this repo.
+_AUTO_TRIM_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _auto_trim_enabled() -> bool:
+    """Read NSYS_AI_MANIFEST_AUTO_TRIM with 0/false/no/off → disabled."""
+    import os
+
+    return os.environ.get("NSYS_AI_MANIFEST_AUTO_TRIM", "1").strip().lower() not in _AUTO_TRIM_FALSE_TOKENS
+
 
 def _auto_select_trim_window(prof) -> tuple[int, int] | None:
     """Pick a representative steady-state window for a long profile.
@@ -90,17 +102,18 @@ def _auto_select_trim_window(prof) -> tuple[int, int] | None:
     # works on both `nvtx_high` and full `nvtx` (DuckDB cache view) and
     # on raw `NVTX_EVENTS` (SQLite fallback); _duckdb_query translates
     # the [end] dialect when needed.
-    nvtx_table = "nvtx_high"
-    try:
-        prof._duckdb_query("SELECT 1 FROM nvtx_high LIMIT 1")
-    except (sqlite3.Error, duckdb.Error):
-        # Fall back to full nvtx; the explicit aten:: exclusion below
-        # keeps the query meaningful even without the high-level view.
-        nvtx_table = "nvtx"
+    #
+    # Probe candidates in preference order. The first one that can be
+    # opened wins — `nvtx_high` is fastest because aten::* is already
+    # filtered, but it only exists on _CACHE_VERSION ≥ 14 caches.
+    nvtx_table = "NVTX_EVENTS"  # final fallback; main query catches missing-table
+    for candidate in ("nvtx_high", "nvtx", "NVTX_EVENTS"):
         try:
-            prof._duckdb_query("SELECT 1 FROM nvtx LIMIT 1")
+            prof._duckdb_query(f"SELECT 1 FROM {candidate} LIMIT 1")
+            nvtx_table = candidate
+            break
         except (sqlite3.Error, duckdb.Error):
-            nvtx_table = "NVTX_EVENTS"
+            continue
 
     sql = f"""
         WITH ranged AS (
@@ -154,8 +167,6 @@ def _auto_select_trim_window(prof) -> tuple[int, int] | None:
 
 def _execute(conn, **kwargs):
     """Build a compact profile health manifest."""
-    import os
-
     from ...profile import Profile
 
     device = int(kwargs.get("device", 0))
@@ -176,7 +187,7 @@ def _execute(conn, **kwargs):
     # melts on the NVTX×kernel IEJoin (15M+ rows) and `iteration_timing`
     # full-table scans. Opt out with NSYS_AI_MANIFEST_AUTO_TRIM=0.
     auto_trim_meta: dict | None = None
-    if not explicit_trim and os.environ.get("NSYS_AI_MANIFEST_AUTO_TRIM", "1") != "0":
+    if not explicit_trim and _auto_trim_enabled():
         try:
             picked = _auto_select_trim_window(prof)
         except Exception as exc:  # noqa: BLE001 — best-effort, never block manifest

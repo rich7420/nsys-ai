@@ -224,9 +224,14 @@ class TestManifestAutoTrim:
         rows = manifest_skill.execute(minimal_nsys_conn, device=0)
         assert "auto_trim" not in rows[0]["data_quality"]
 
-    def test_env_var_disables_auto_trim(self, monkeypatch, minimal_nsys_conn, manifest_skill):
-        """NSYS_AI_MANIFEST_AUTO_TRIM=0 opts out even on long profiles."""
-        monkeypatch.setenv("NSYS_AI_MANIFEST_AUTO_TRIM", "0")
+    @pytest.mark.parametrize("token", ["0", "false", "False", "no", "OFF", " 0 "])
+    def test_env_var_disables_auto_trim(
+        self, token, monkeypatch, minimal_nsys_conn, manifest_skill
+    ):
+        """NSYS_AI_MANIFEST_AUTO_TRIM accepts the same off-tokens as the rest
+        of the repo (0 / false / no / off, case-insensitive, trim-tolerant).
+        """
+        monkeypatch.setenv("NSYS_AI_MANIFEST_AUTO_TRIM", token)
         # Also lower the threshold so the fixture profile would normally
         # qualify for auto-trim — proves the env var is what stopped it.
         monkeypatch.setattr(
@@ -235,6 +240,21 @@ class TestManifestAutoTrim:
         )
         rows = manifest_skill.execute(minimal_nsys_conn, device=0)
         assert "auto_trim" not in rows[0]["data_quality"]
+
+    @pytest.mark.parametrize("token", ["1", "true", "yes", "on", ""])
+    def test_env_var_truthy_keeps_auto_trim_enabled(
+        self, token, monkeypatch, minimal_nsys_conn, manifest_skill
+    ):
+        """Any value that is NOT in the off-token set leaves auto-trim on."""
+        monkeypatch.setenv("NSYS_AI_MANIFEST_AUTO_TRIM", token)
+        monkeypatch.setattr(
+            "nsys_ai.skills.builtins.profile_health_manifest._AUTO_TRIM_PROFILE_SPAN_THRESHOLD_NS",
+            0,
+        )
+        rows = manifest_skill.execute(minimal_nsys_conn, device=0)
+        # auto_trim will be applied (threshold=0) — proves the env var
+        # didn't switch it off.
+        assert rows[0]["data_quality"].get("auto_trim", {}).get("applied") is True
 
 
 class TestManifestFormat:
