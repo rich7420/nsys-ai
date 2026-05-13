@@ -417,6 +417,13 @@ def _order_clause_for(
       - deviceId-scoped tables → ORDER BY deviceId, start
       - per-thread runtime/nvtx → ORDER BY globalTid, start
       - time-only event streams → ORDER BY start
+
+    All ordering keys are wrapped in ``TRY_CAST(... AS BIGINT)``: the SQLite
+    attach in ``_build_cache_into`` falls back to ``sqlite_all_varchar=true``
+    on some Nsight schemas, which would make these numeric columns VARCHAR
+    and turn ORDER BY into lexicographic sort (``'9999'`` after ``'10000'``)
+    — defeating the zonemap intent. ``TRY_CAST`` is a no-op when the column
+    is already integer-typed.
     """
     plan: dict[str, list[str]] = {
         "runtime": ["globalTid", "start"],
@@ -434,8 +441,8 @@ def _order_clause_for(
     present = [c for c in cols if _table_has_column(db, table_ref, c)]
     if not present:
         return ""
-    quoted = ", ".join(f'"{c}"' for c in present)
-    return f"ORDER BY {quoted}"
+    cast = ", ".join(f'TRY_CAST("{c}" AS BIGINT)' for c in present)
+    return f"ORDER BY {cast}"
 
 
 def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
@@ -513,6 +520,8 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
         # `--trim S E` time-range filters. Without explicit ordering,
         # row-group min/max ranges overlap and pruning is ineffective.
         # See: https://duckdb.org/docs/current/guides/performance/indexing
+        # TRY_CAST guards against the `sqlite_all_varchar=true` attach
+        # fallback, which would otherwise give lexicographic ordering.
         kernel_table = _find_table(src_tables, "CUPTI_ACTIVITY_KIND_KERNEL")
         if kernel_table:
             _progress("kernels.parquet")
@@ -529,7 +538,7 @@ def _build_cache_into(sqlite_path: str, cache_dir: Path) -> Path:
                     FROM src.{kernel_table} k
                     LEFT JOIN src.StringIds s ON k.shortName = s.id
                     LEFT JOIN src.StringIds d ON k.demangledName = d.id
-                    ORDER BY k.deviceId, k.start
+                    ORDER BY TRY_CAST(k.deviceId AS BIGINT), TRY_CAST(k.start AS BIGINT)
                 ) TO '{_safe_path(cache_dir / "kernels.parquet")}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """)
 
