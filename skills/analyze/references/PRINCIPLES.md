@@ -379,31 +379,51 @@ Reply with <options>, or "stop" to abort.
 
 ## §9 Performance budget
 
-Skills scale on row counts, not file size. Read counts from the manifest:
+Skills scale on row counts, not file size. For multi-iteration profiles the
+whole run is rarely useful — analyze a single iteration. Read trigger fields
+from the manifest:
 
 ```bash
 nsys-ai skill run profile_health_manifest <profile> --format json
-# fields used: kernel_count, nvtx.has_nvtx, nvtx.iteration_count
+# fields: nvtx.has_nvtx, nvtx.iteration_count, profile_span_ms
 ```
 
-Heavy skills and trim triggers:
+Trim modes on `nsys-ai skill run` (preference order):
 
-| Skill | Cost bound | Trim when |
-|---|---|---|
-| `nvtx_layer_breakdown` | kernels × avg nvtx depth (range-IEJoin) | `kernel_count` > 500_000 |
-| `nvtx_kernel_map` | same | same |
-| `gpu_idle_gaps` | kernels, sort | `kernel_count` > 500_000 |
+| Form | When |
+|---|---|
+| `--iteration N` | NVTX iteration markers present (cleanest) |
+| `--trim START_S END_S` | manual window, seconds |
+| `-p trim_start_ns=… -p trim_end_ns=…` | when ns precision matters |
 
-Trim to one representative iteration:
+Heavy skills (range-IEJoin: kernels × avg NVTX depth):
+
+| Skill | Trim trigger |
+|---|---|
+| `nvtx_layer_breakdown` | `nvtx.iteration_count > 1` OR `profile_span_ms > 30_000` |
+| `nvtx_kernel_map` | same |
+| `gpu_idle_gaps` | `profile_span_ms > 30_000` |
+
+**First-open cache trap.** The cache builder materializes
+`nvtx_kernel_map.parquet` via the same range-IEJoin, so on NVTX-heavy
+profiles even a cheap skill (`iteration_timing`, `profile_health_manifest`)
+blocks on it the first time — observed > 10 min on a 10 M NVTX × 1 M
+kernel profile. Once `<profile>.nsys-cache/nvtx_kernel_map.parquet`
+exists, subsequent skill runs are sub-second.
+
+Recipe with iteration markers (`nvtx.has_nvtx == true`):
+
+```bash
+nsys-ai skill run nvtx_layer_breakdown <profile> --iteration 5 --format json
+```
+
+Recipe without:
 
 1. `iteration_timing` → pick a median-duration iteration N (skip iter 0 — JIT)
-2. `iteration_detail -p iteration=N` → read `start_ns`, `end_ns`
-3. Heavy skill with `-p trim_start_ns=<start> -p trim_end_ns=<end>`
+2. `iteration_detail -p iteration=N` → read `gpu_start_ns`, `gpu_end_ns`
+3. Heavy skill with `-p trim_start_ns=<gpu_start_ns> -p trim_end_ns=<gpu_end_ns>`
 
 `--max-rows N` bounds output rows only, not query work. To bound work, trim.
-
-First-open cache build: ZSTD Parquet under `<profile>.nsys-cache/`; subsequent
-opens sub-second. Falls back to direct SQLite automatically.
 
 ---
 
