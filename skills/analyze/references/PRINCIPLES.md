@@ -128,7 +128,9 @@ nsys-ai analyze <profile> --gpu <device_id> --format json -o /tmp/findings.json
 nsys-ai timeline-web <profile> --findings /tmp/findings.json
 ```
 
-`<device_id>` from manifest's `overlap.device_id` (typically `0`). The legacy
+`<device_id>` is `0` for single-GPU runs. For multi-GPU profiles, run
+`overlap_breakdown` first and pick `available_devices[0]` from its output
+(the manifest's `overlap` subobject does not expose a device id). The legacy
 `nsys-ai evidence build` still works and emits the same JSON shape but is
 deprecated — use `analyze --format json`.
 
@@ -390,7 +392,9 @@ from the manifest:
 
 ```bash
 nsys-ai skill run profile_health_manifest <profile> --format json
-# fields: nvtx.has_nvtx, nvtx.iteration_count, profile_span_ms
+# fields: nvtx.has_nvtx, nvtx.iteration_count
+# full span: data_quality.auto_trim.profile_full_span_ms when auto-trimmed,
+#            else top-level profile_span_ms
 ```
 
 Trim modes on `nsys-ai skill run` (preference order):
@@ -418,7 +422,9 @@ is the trimmed window; read the actual span from
 profiles even a cheap skill (`iteration_timing`, `profile_health_manifest`)
 blocks on it the first time — observed > 10 min on a 10 M NVTX × 1 M
 kernel profile. Once `<profile>.nsys-cache/nvtx_kernel_map.parquet`
-exists, subsequent skill runs are sub-second.
+exists, subsequent skill runs range from sub-second (`top_kernels`,
+`memory_transfers`, `h2d_distribution`) to 20–30 s for the heavier ones
+(`iteration_detail`, `host_sync_parent_ranges`, `nvtx_layer_breakdown`).
 
 Recipe with iteration markers (`nvtx.has_nvtx == true`):
 
