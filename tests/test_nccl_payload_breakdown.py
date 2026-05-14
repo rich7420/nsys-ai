@@ -438,6 +438,50 @@ def test_format_handles_summary_only_no_data_rows():
     assert "Total payload events:  0" in text
 
 
+def test_skill_output_is_json_serializable():
+    """The skill emits via CLI's `--format json` path. If anything leaks
+    into the output that json can't serialize (set, bytes, NaN, None
+    from a malformed schema), this catches it before end-to-end."""
+    import json
+
+    conn = _build_db_with_nccl_payloads()
+    rows = SKILL.execute_fn(conn)
+    # Must not raise.
+    serialized = json.dumps(rows)
+    # Round-trip equality on basic structure.
+    re_parsed = json.loads(serialized)
+    assert re_parsed[0]["_summary"] is True
+    assert len(re_parsed) == len(rows)
+
+
+def test_summary_message_carrying_events_excludes_marker_only_schemas():
+    """`message_carrying_events` must count ONLY events whose schema declares
+    a "Message size [bytes]" field — group_marker / init events don't
+    contribute. Validates the field's documented semantics."""
+    conn = _build_db_with_nccl_payloads()
+    # Add a group_marker event (schema 300 with only comm_id, no msg_size).
+    c = conn.cursor()
+    c.execute("INSERT INTO NVTX_PAYLOAD_SCHEMAS VALUES (1, 300, NULL, 1, NULL, 1, 8, NULL)")
+    c.execute(
+        "INSERT INTO NVTX_PAYLOAD_SCHEMA_ENTRIES VALUES "
+        "(1, 300, 0, NULL, 18, 'NCCL communicator ID', NULL, NULL, NULL)"
+    )
+    # 2 group_marker events
+    for _ in range(2):
+        payload = struct.pack("<Q", 0xCAFE_BABE_DEAD_BEEF)
+        c.execute("INSERT INTO NVTX_EVENTS VALUES (?, 59, ?)", (0, _pack_event(300, payload)))
+    conn.commit()
+
+    rows = SKILL.execute_fn(conn)
+    s = rows[0]
+    # Fixture: 3 collective + 2 p2p = 5 message-carrying. Plus 2 group_marker = 7 total.
+    assert s["total_payload_events"] == 7
+    assert s["message_carrying_events"] == 5, (
+        f"group_marker events must NOT be counted; got "
+        f"message_carrying={s['message_carrying_events']}"
+    )
+
+
 def test_summary_totals_consistent_with_per_schema_totals():
     """`_summary.total_bytes_all` MUST equal the sum of per-schema
     `msg_size_bytes_total` — any drift indicates the aggregation logic

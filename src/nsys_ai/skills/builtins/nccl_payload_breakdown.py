@@ -10,7 +10,8 @@ This skill decodes that blob and aggregates per schema category. It is the
 foundation for downstream NCCL-aware skills (``nccl_bandwidth_utilization``,
 etc.) — without real message sizes from the profile, those have to estimate.
 
-Binary layout (verified against Nsight 2026.x profiles):
+Binary layout (verified against Nsight Systems 2026.2.x profiles —
+revalidate if a future Nsight major version changes the header):
   bytes 0-3   uint32  domainId
   bytes 4-7   uint32  (reserved / flags)
   bytes 8-11  uint32  schemaId
@@ -87,7 +88,10 @@ def _load_schemas(adapter) -> dict[int, dict]:
     if schemas and all(not s["fields"] for s in schemas.values()):
         _log.warning(
             "NVTX_PAYLOAD_SCHEMAS loaded (%d) but NVTX_PAYLOAD_SCHEMA_ENTRIES "
-            "returned no fields — entries query likely failed silently.",
+            "returned no fields — entries query likely failed silently. "
+            "Common cause: a column rename or reserved-keyword conflict in a "
+            "newer Nsight version (e.g. `offset` became reserved in DuckDB). "
+            "Inspect the table schema with PRAGMA table_info or DESCRIBE.",
             len(schemas),
         )
     return schemas
@@ -228,6 +232,7 @@ def _execute(conn, **kwargs) -> list[dict]:
 
     rows: list[dict] = []
     total_bytes = 0
+    message_carrying_events = 0
     for sid, bucket in sorted(per_schema.items()):
         field_names = [fl["name"] for fl in schemas[sid]["fields"]]
         category = _classify(field_names)
@@ -242,6 +247,7 @@ def _execute(conn, **kwargs) -> list[dict]:
             "distinct_communicators": len(bucket["communicators"]),
         }
         if sizes:
+            message_carrying_events += len(sizes)
             row["msg_size_bytes_total"] = msg_total
             row["msg_size_bytes_min"] = sizes[0]
             row["msg_size_bytes_p50"] = _percentile(sizes, 0.50)
@@ -250,9 +256,16 @@ def _execute(conn, **kwargs) -> list[dict]:
         rows.append(row)
 
     # Prepend a summary row so consumers see profile-wide totals.
+    # `total_payload_events` counts every decoded NVTX payload event;
+    # `message_carrying_events` is the subset whose schema declares a
+    # "Message size [bytes]" field (collective + p2p). The gap is
+    # init + group_marker events. Surfacing both means a profile with
+    # 1000 group_markers and 0 collectives reads as "1000 events / 0
+    # carrying / 0 bytes" instead of the ambiguous "1000 events / 0 bytes".
     summary = {
         "_summary": True,
         "total_payload_events": decoded,
+        "message_carrying_events": message_carrying_events,
         "skipped_events": skipped,
         "total_bytes_all": total_bytes,
         "total_gib_all": round(total_bytes / (1024**3), 2),
@@ -265,11 +278,13 @@ def _format(rows: list[dict]) -> str:
     if not rows or "error" in rows[0]:
         return f"(NCCL payload: {rows[0].get('error', 'no data') if rows else 'no data'})"
     s = rows[0]
+    carrying = s.get("message_carrying_events", s["total_payload_events"])
     lines = [
         "── NCCL Payload Breakdown ──",
         f"  Total payload events:  {s['total_payload_events']:,}"
         + (f"  ({s['skipped_events']:,} undecodable)" if s["skipped_events"] else ""),
-        f"  Total bytes transferred: {s['total_gib_all']} GiB",
+        f"  Message-carrying:      {carrying:,}"
+        f"   ({s['total_gib_all']} GiB total)",
         f"  Distinct schemas:      {s['distinct_schemas']}",
         "",
     ]
