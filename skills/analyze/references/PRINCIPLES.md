@@ -90,6 +90,7 @@ use the §7 template but offer an alternative path (not a hard block).
 | 6 | Mode 7 on host without GPU AND user declined Modal | `cutracer/runner.py` subprocess fails | Pre-check `nvidia-smi`; §4.3 row 2 first |
 | 7 | Mode 8 paths resolve to same inode | Not validated in `diff.py` | Plugin `os.stat().st_ino` compare; stop before `nsys-ai diff` |
 | 8 | Mode 9 empty `iteration_timing` | Skill returns `[]` only after NVTX matching and kernel-gap heuristic fallback both fail, or required runtime tables are unavailable | Offer Mode 5 Path B (see §4.3 row 3) |
+| 9 | `.sqlite` header invalid (partial `nsys export`) | First 16 bytes ≠ `"SQLite format 3"`; `profile.py` mtime check is fooled because the partial file is newer than the `.nsys-rep` | Pre-check magic header; if invalid and `.nsys-rep` exists, re-export silently (§4.2 row 1 flow) |
 
 ### §4.2 Auto-handled — plugin must NOT ask the user
 
@@ -376,15 +377,33 @@ Reply with <options>, or "stop" to abort.
 
 ---
 
-## §9 Performance Notes
+## §9 Performance budget
 
-- **DuckDB + Parquet default.** First open exports SQLite → `<profile>.nsys-cache/`
-  ZSTD Parquet. Subsequent opens sub-second. Falls back to direct SQLite automatically.
-- **Large profiles** (>100 MB): narrow the window via `--trim START_S END_S` on `skill run`.
-  Best practice: profile 1–2 representative iterations, not the entire run.
-- **Costliest skills** on big files: `nvtx_kernel_map`, `nvtx_layer_breakdown`,
-  `gpu_idle_gaps`. Trim before running.
-- **Auto-indexing**: one-time ~30 s cost for 250 MB profiles; speeds up subsequent queries.
+Skills scale on row counts, not file size. Read counts from the manifest:
+
+```bash
+nsys-ai skill run profile_health_manifest <profile> --format json
+# fields used: kernel_count, nvtx.has_nvtx, nvtx.iteration_count
+```
+
+Heavy skills and trim triggers:
+
+| Skill | Cost bound | Trim when |
+|---|---|---|
+| `nvtx_layer_breakdown` | kernels × avg nvtx depth (range-IEJoin) | `kernel_count` > 500_000 |
+| `nvtx_kernel_map` | same | same |
+| `gpu_idle_gaps` | kernels, sort | `kernel_count` > 500_000 |
+
+Trim to one representative iteration:
+
+1. `iteration_timing` → pick a median-duration iteration N (skip iter 0 — JIT)
+2. `iteration_detail -p iteration=N` → read `start_ns`, `end_ns`
+3. Heavy skill with `-p trim_start_ns=<start> -p trim_end_ns=<end>`
+
+`--max-rows N` bounds output rows only, not query work. To bound work, trim.
+
+First-open cache build: ZSTD Parquet under `<profile>.nsys-cache/`; subsequent
+opens sub-second. Falls back to direct SQLite automatically.
 
 ---
 
