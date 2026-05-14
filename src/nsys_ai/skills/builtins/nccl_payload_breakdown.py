@@ -36,9 +36,10 @@ _log = logging.getLogger(__name__)
 # Type 22 = uint64 (message size in bytes).
 _TYPE_SIZES = {5: 4, 18: 8, 22: 8}
 
-# 32-byte event header layout (little-endian).
+# Event header layout (little-endian), 32 bytes total. Derive the size from
+# the format so a future format change can't desync this constant.
 _HEADER_FMT = "<IIIIQQ"
-_HEADER_SIZE = 32
+_HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 
 
 def _load_schemas(adapter) -> dict[int, dict]:
@@ -118,10 +119,17 @@ def _decode_row(bd, schemas: dict[int, dict]) -> dict | None:
     if len(bd) < _HEADER_SIZE:
         return None
     try:
-        _domain, _, schema_id, _, payload_size, _ = struct.unpack_from(_HEADER_FMT, bd, 0)
+        _domain, _, schema_id, _, _hdr_payload_size, _ = struct.unpack_from(_HEADER_FMT, bd, 0)
     except struct.error:
         return None
-    if schema_id not in schemas or len(bd) < _HEADER_SIZE + payload_size:
+    if schema_id not in schemas:
+        return None
+    # Trust the schema's declared payload size (authoritative) over the
+    # header's payload_size field. Belt-and-braces: if either says the
+    # buffer is too short, bail.
+    schema_payload_size = schemas[schema_id]["payload_size"] or 0
+    required = _HEADER_SIZE + max(schema_payload_size, _hdr_payload_size or 0)
+    if len(bd) < required:
         return None
     out: dict = {"schema_id": schema_id}
     fields: dict[str, int] = {}
@@ -130,6 +138,11 @@ def _decode_row(bd, schemas: dict[int, dict]) -> dict | None:
         if sz is None:
             continue
         off = _HEADER_SIZE + f["offset"]
+        # Guard against schema rows whose offsets exceed the declared
+        # payload size — without this, a malformed schema could send us
+        # reading past the buffer end.
+        if off + sz > _HEADER_SIZE + schema_payload_size:
+            continue
         fmt = "<I" if sz == 4 else "<Q"
         try:
             (val,) = struct.unpack_from(fmt, bd, off)

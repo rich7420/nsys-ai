@@ -12,6 +12,8 @@ import sqlite3
 import struct
 
 from nsys_ai.skills.builtins.nccl_payload_breakdown import (
+    _HEADER_FMT,
+    _HEADER_SIZE,
     SKILL,
     _classify,
     _decode_row,
@@ -21,11 +23,15 @@ from nsys_ai.skills.builtins.nccl_payload_breakdown import (
 
 
 def _pack_event(schema_id: int, payload_bytes: bytes) -> bytes:
-    """Build a 32-byte header + payload, matching Nsight's binaryData format."""
+    """Build the header + payload using the production constants.
+
+    Importing `_HEADER_FMT` / `_HEADER_SIZE` directly (rather than hard-coding
+    "<IIIIQQ" / 32 here) means any future header-layout change in the skill
+    will be reflected by these test fixtures too — preventing the test suite
+    from drifting silently behind production.
+    """
     payload_size = len(payload_bytes)
-    header = struct.pack(
-        "<IIIIQQ", 1, 0, schema_id, 0, payload_size, 32 + payload_size
-    )
+    header = struct.pack(_HEADER_FMT, 1, 0, schema_id, 0, payload_size, _HEADER_SIZE + payload_size)
     return header + payload_bytes
 
 
@@ -267,6 +273,81 @@ def test_decode_row_skips_unknown_field_type():
     assert decoded["fields"]["NCCL communicator ID"] == 0xCAFE_BEEF
     # Unknown-type field skipped (not crashed, not present):
     assert "Future field (unknown)" not in decoded["fields"]
+
+
+def test_load_schemas_warns_on_silent_entries_failure(caplog):
+    """Regression guard for the DuckDB reserved-keyword landmine: when
+    NVTX_PAYLOAD_SCHEMAS loads but NVTX_PAYLOAD_SCHEMA_ENTRIES fails (or
+    returns no rows), _load_schemas must log a WARNING. Without this, a
+    silent SQL failure leaves every event undecodable and no signal in
+    the output explains why."""
+    import logging
+
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    # Schemas table populated, entries table empty.
+    c.execute(
+        "CREATE TABLE NVTX_PAYLOAD_SCHEMAS "
+        "(domainId INTEGER, schemaId INTEGER, name TEXT, type INTEGER, "
+        " flags INTEGER, numEntries INTEGER, payloadSize INTEGER, alignTo INTEGER)"
+    )
+    c.execute("INSERT INTO NVTX_PAYLOAD_SCHEMAS VALUES (1, 100, NULL, 1, NULL, 2, 16, NULL)")
+    c.execute(
+        "CREATE TABLE NVTX_PAYLOAD_SCHEMA_ENTRIES "
+        "(domainId INTEGER, schemaId INTEGER, idx INTEGER, flags INTEGER, "
+        " type INTEGER, name TEXT, description TEXT, arrayOrUnionDetail INTEGER, offset INTEGER)"
+    )
+    conn.commit()
+
+    with caplog.at_level(logging.WARNING, logger="nsys_ai.skills.builtins.nccl_payload_breakdown"):
+        schemas = _load_schemas(conn)
+
+    assert len(schemas) == 1
+    assert all(not s["fields"] for s in schemas.values())
+    assert any(
+        "returned no fields" in rec.message for rec in caplog.records
+    ), f"expected WARNING about empty fields[], got: {[r.message for r in caplog.records]}"
+
+
+def test_decode_row_rejects_buffer_too_short_for_schema():
+    """When a header advertises a tiny payload but the schema declares
+    fields at higher offsets, the decoder must not read past the buffer
+    end. Trust the schema's declared payload size as authoritative."""
+    schemas = {100: {"payload_size": 24, "fields": [
+        {"idx": 0, "type": 18, "name": "NCCL communicator ID", "offset": 0},
+        {"idx": 1, "type": 22, "name": "Message size [bytes]", "offset": 8},
+        {"idx": 2, "type": 5, "name": "Peer rank", "offset": 16},
+    ]}}
+    # Pack a 16-byte payload (less than schema's 24-byte requirement).
+    short_payload = struct.pack("<QQ", 0xDEAD_BEEF, 4096)
+    bd = _pack_event(100, short_payload)
+    # bd length is _HEADER_SIZE + 16 — schema needs _HEADER_SIZE + 24.
+    decoded = _decode_row(bd, schemas)
+    assert decoded is None, (
+        "Decoder must reject when buffer is shorter than schema's declared "
+        "payload size, even if the header agrees with the shorter length"
+    )
+
+
+def test_decode_row_skips_field_offsets_beyond_payload():
+    """If a schema has a single oversized field offset beyond payload_size,
+    that field is skipped — other fields still decode."""
+    schemas = {100: {"payload_size": 16, "fields": [
+        {"idx": 0, "type": 18, "name": "NCCL communicator ID", "offset": 0},
+        # Bogus: offset 100 exceeds payload_size=16
+        {"idx": 1, "type": 22, "name": "Out-of-range field", "offset": 100},
+    ]}}
+    payload = struct.pack("<QQ", 0xCAFE_BEEF, 9999)
+    decoded = _decode_row(_pack_event(100, payload), schemas)
+    assert decoded is not None
+    assert decoded["fields"]["NCCL communicator ID"] == 0xCAFE_BEEF
+    assert "Out-of-range field" not in decoded["fields"]
+
+
+def test_header_size_matches_format():
+    """_HEADER_SIZE is computed from _HEADER_FMT at import time. Verify
+    they stay consistent in case someone hand-edits one but not the other."""
+    assert _HEADER_SIZE == struct.calcsize(_HEADER_FMT)
 
 
 def test_skill_counts_distinct_communicators():
