@@ -90,6 +90,7 @@ use the §7 template but offer an alternative path (not a hard block).
 | 6 | Mode 7 on host without GPU AND user declined Modal | `cutracer/runner.py` subprocess fails | Pre-check `nvidia-smi`; §4.3 row 2 first |
 | 7 | Mode 8 paths resolve to same inode | Not validated in `diff.py` | Plugin `os.stat().st_ino` compare; stop before `nsys-ai diff` |
 | 8 | Mode 9 empty `iteration_timing` | Skill returns `[]` only after NVTX matching and kernel-gap heuristic fallback both fail, or required runtime tables are unavailable | Offer Mode 5 Path B (see §4.3 row 3) |
+| 9 | `.sqlite` header invalid (partial `nsys export`) | First 16 bytes ≠ `"SQLite format 3"`; `profile.py` mtime check is fooled because the partial file is newer than the `.nsys-rep` | Pre-check magic header; if invalid and `.nsys-rep` exists, re-export silently (§4.2 row 1 flow) |
 
 ### §4.2 Auto-handled — plugin must NOT ask the user
 
@@ -123,9 +124,17 @@ Every Mode 1–9 ends with this sequence between skill execution and the 3-part 
 ### §5.1 CLI sequence
 
 ```bash
-nsys-ai evidence build <profile> --format json -o /tmp/findings.json
+nsys-ai analyze <profile> --gpu <device_id> --format json -o /tmp/findings.json
 nsys-ai timeline-web <profile> --findings /tmp/findings.json
 ```
+
+`<device_id>` is `0` for single-GPU runs. For multi-GPU profiles, run
+`overlap_breakdown` first; each row has a `device_id` field — pick the
+first row's value (the manifest's `overlap` subobject does not expose a
+device id, and `available_devices` only appears in the empty-device-0
+diagnostic dict at `overlap.py:249`, not in normal output). The legacy
+`nsys-ai evidence build` still works and emits the same JSON shape but is
+deprecated — use `analyze --format json`.
 
 Then tell the user the exact URL emitted by `timeline-web` (look for `http://127.0.0.1:PORT` in its stdout):
 > "Timeline ready at http://127.0.0.1:PORT — open in browser to see findings overlay."
@@ -151,9 +160,9 @@ Then `nsys-ai timeline-web <profile> --findings <custom.json>`.
 
 ### §5.3 Fail-soft rule
 
-If `evidence build` fails (profile has no detectable pattern), emit `{"findings": []}`
-and still run `timeline-web`. User sees an unannotated timeline; delivery proceeds. **Never
-block delivery on evidence-step failure.**
+If `analyze --format json` fails (profile has no detectable pattern), emit
+`{"findings": []}` and still run `timeline-web`. User sees an unannotated timeline;
+delivery proceeds. **Never block delivery on evidence-step failure.**
 
 ### §5.4 Optional text report
 
@@ -163,15 +172,19 @@ Only on explicit user request ("save this", "generate report", "markdown report"
 nsys-ai report <profile> --gpu <device_id> --trim <start_s> <end_s> -o report.md
 ```
 
-Both `--gpu` and `--trim` are required (verified `src/nsys_ai/cli/parsers.py:289`). Plugin
-supplies from manifest: `gpu` = first device in `overlap.available_devices` or 0; `trim`
-= smart-trim iteration range (if Mode 1 Stage 3 was taken) else
-`0 profile_span_ms/1000`. Slow on large profiles — confirm before running.
+Both `--gpu` and `--trim` are required (verified `src/nsys_ai/cli/parsers.py:289`).
+Plugin defaults: `gpu` = `0` for single-GPU, else the first row's `device_id` from
+`overlap_breakdown` output (see §5.1 caveat about `available_devices`); `trim` =
+smart-trim iteration range (if Mode 1 Stage 3 was taken) else
+`0 → profile_span_ms/1000` (read full span from
+`data_quality.auto_trim.profile_full_span_ms` when auto-trim has applied).
+Slow on large profiles — confirm before running.
 
 ### §5.5 Mode 7 evidence exception
 
-Mode 7 (CUTracer) **skips `evidence build` entirely** — `cutracer analyze` output is the
-evidence layer. Open `timeline-web` without `--findings` for unannotated context only:
+Mode 7 (CUTracer) **skips the §5.1 evidence step entirely** — `cutracer analyze`
+output is the evidence layer. Open `timeline-web` without `--findings` for
+unannotated context only:
 
 ```bash
 nsys-ai timeline-web <profile>
@@ -180,10 +193,10 @@ nsys-ai timeline-web <profile>
 ### §5.6 Mode 8 evidence adaptation
 
 Mode 8 (Diff) has two profiles but only **one after-timeline** is served. Run
-`evidence build` on the **after profile only** — never on the before profile.
+the §5.1 evidence step on the **after profile only** — never on the before profile.
 
 ```bash
-nsys-ai evidence build <after> --format json -o /tmp/findings.json
+nsys-ai analyze <after> --gpu <device_id> --format json -o /tmp/findings.json
 ```
 
 Then annotate `findings.json` with regression labels pulled from
@@ -376,15 +389,61 @@ Reply with <options>, or "stop" to abort.
 
 ---
 
-## §9 Performance Notes
+## §9 Performance budget
 
-- **DuckDB + Parquet default.** First open exports SQLite → `<profile>.nsys-cache/`
-  ZSTD Parquet. Subsequent opens sub-second. Falls back to direct SQLite automatically.
-- **Large profiles** (>100 MB): narrow the window via `--trim START_S END_S` on `skill run`.
-  Best practice: profile 1–2 representative iterations, not the entire run.
-- **Costliest skills** on big files: `nvtx_kernel_map`, `nvtx_layer_breakdown`,
-  `gpu_idle_gaps`. Trim before running.
-- **Auto-indexing**: one-time ~30 s cost for 250 MB profiles; speeds up subsequent queries.
+Skills scale on row counts, not file size. For multi-iteration profiles the
+whole run is rarely useful — analyze a single iteration. Read trigger fields
+from the manifest:
+
+```bash
+nsys-ai skill run profile_health_manifest <profile> --format json
+# fields: nvtx.has_nvtx, nvtx.iteration_count
+# full span: data_quality.auto_trim.profile_full_span_ms when auto-trimmed,
+#            else top-level profile_span_ms
+```
+
+Trim modes on `nsys-ai skill run` (preference order):
+
+| Form | When |
+|---|---|
+| `--iteration N` | NVTX iteration markers present (cleanest) |
+| `--trim START_S END_S` | manual window, seconds |
+| `-p trim_start_ns=… -p trim_end_ns=…` | when ns precision matters |
+
+Heavy skills (range-IEJoin: kernels × avg NVTX depth):
+
+| Skill | Trim trigger |
+|---|---|
+| `nvtx_layer_breakdown` | `nvtx.iteration_count > 1` OR full span > 30 s* |
+| `nvtx_kernel_map` | same |
+| `gpu_idle_gaps` | full span > 30 s* |
+
+\* When `data_quality.auto_trim.applied == true` the top-level `profile_span_ms`
+is the trimmed window; read the actual span from
+`data_quality.auto_trim.profile_full_span_ms`.
+
+**First-open cache trap.** The cache builder materializes
+`nvtx_kernel_map.parquet` via the same range-IEJoin, so on NVTX-heavy
+profiles even a cheap skill (`iteration_timing`, `profile_health_manifest`)
+blocks on it the first time — observed > 10 min on a 10 M NVTX × 1 M
+kernel profile. Once `<profile>.nsys-cache/nvtx_kernel_map.parquet`
+exists, subsequent skill runs range from sub-second (`top_kernels`,
+`memory_transfers`, `h2d_distribution`) to 20–30 s for the heavier ones
+(`iteration_detail`, `host_sync_parent_ranges`, `nvtx_layer_breakdown`).
+
+Recipe with iteration markers (`nvtx.has_nvtx == true`):
+
+```bash
+nsys-ai skill run nvtx_layer_breakdown <profile> --iteration 5 --format json
+```
+
+Recipe without:
+
+1. `iteration_timing` → pick a median-duration iteration N (skip iter 0 — JIT)
+2. `iteration_detail -p iteration=N` → read `gpu_start_ns`, `gpu_end_ns`
+3. Heavy skill with `-p trim_start_ns=<gpu_start_ns> -p trim_end_ns=<gpu_end_ns>`
+
+`--max-rows N` bounds output rows only, not query work. To bound work, trim.
 
 ---
 

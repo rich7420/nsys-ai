@@ -7,13 +7,18 @@ Reference for `/nsys-ai` Mode 5. **Read `PRINCIPLES.md` first** — §4 guards, 
 
 ## 1. Precondition gate
 
-Run a single-row probe first:
+Check the manifest first (cheap — pre-computed at cache build):
 
 ```bash
-nsys-ai skill run nvtx_layer_breakdown <profile> --format json --max-rows 1
+nsys-ai skill run profile_health_manifest <profile> --format json
+# precondition: .nvtx.has_nvtx == true
 ```
 
-If empty, render the §7 template:
+Do NOT use `nvtx_layer_breakdown --max-rows 1` as a probe — `--max-rows` bounds
+output rows only; the underlying range-IEJoin still scans the whole NVTX table
+(see PRINCIPLES.md §9).
+
+If `nvtx.has_nvtx` is false, render the §7 template:
 
 ```
 Mode 5 requires a user choice.
@@ -118,7 +123,7 @@ After delivery, suggest a second mode only if a distinct critical finding exists
 
 ## 6. Delivery
 
-Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summary:
+Follow `PRINCIPLES.md §5` for evidence + timeline URL. Then 3-part summary:
 
 1. **Root cause** — layer name + quantified % + mechanism:
    > "The `TransformerLayer.12.attn_fwd` region accounts for 34% of GPU time. Top kernel is

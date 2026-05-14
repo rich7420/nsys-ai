@@ -80,7 +80,7 @@ After delivery, suggest a second mode only if a distinct critical finding exists
 
 ## 6. Delivery
 
-Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summary:
+Follow `PRINCIPLES.md §5` for evidence + timeline URL. Then 3-part summary:
 
 1. **Root cause** — transfer class + direction + quantified waste:
    > "H2D transfers account for 22% of profile time. `h2d_distribution` shows a `spread_out`
