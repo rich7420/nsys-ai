@@ -98,7 +98,7 @@ fields: `name`, `demangled`, `delta_ns`, `before_share`, `after_share`, `classif
 
 ## 6. Delivery
 
-**Evidence**: follow PRINCIPLES §5.6 (Mode 8 adaptation) — run `evidence build <after>`
+**Evidence**: follow PRINCIPLES §5.6 (Mode 8 adaptation) — run `analyze <after> --gpu <device_id> --format json`
 only, never the before profile. Craft a findings JSON with regression labels, then serve
 the after-profile timeline:
 

@@ -124,9 +124,13 @@ Every Mode 1–9 ends with this sequence between skill execution and the 3-part 
 ### §5.1 CLI sequence
 
 ```bash
-nsys-ai evidence build <profile> --format json -o /tmp/findings.json
+nsys-ai analyze <profile> --gpu <device_id> --format json -o /tmp/findings.json
 nsys-ai timeline-web <profile> --findings /tmp/findings.json
 ```
+
+`<device_id>` from manifest's `overlap.device_id` (typically `0`). The legacy
+`nsys-ai evidence build` still works and emits the same JSON shape but is
+deprecated — use `analyze --format json`.
 
 Then tell the user the exact URL emitted by `timeline-web` (look for `http://127.0.0.1:PORT` in its stdout):
 > "Timeline ready at http://127.0.0.1:PORT — open in browser to see findings overlay."
@@ -152,9 +156,9 @@ Then `nsys-ai timeline-web <profile> --findings <custom.json>`.
 
 ### §5.3 Fail-soft rule
 
-If `evidence build` fails (profile has no detectable pattern), emit `{"findings": []}`
-and still run `timeline-web`. User sees an unannotated timeline; delivery proceeds. **Never
-block delivery on evidence-step failure.**
+If `analyze --format json` fails (profile has no detectable pattern), emit
+`{"findings": []}` and still run `timeline-web`. User sees an unannotated timeline;
+delivery proceeds. **Never block delivery on evidence-step failure.**
 
 ### §5.4 Optional text report
 
@@ -171,8 +175,9 @@ supplies from manifest: `gpu` = first device in `overlap.available_devices` or 0
 
 ### §5.5 Mode 7 evidence exception
 
-Mode 7 (CUTracer) **skips `evidence build` entirely** — `cutracer analyze` output is the
-evidence layer. Open `timeline-web` without `--findings` for unannotated context only:
+Mode 7 (CUTracer) **skips the §5.1 evidence step entirely** — `cutracer analyze`
+output is the evidence layer. Open `timeline-web` without `--findings` for
+unannotated context only:
 
 ```bash
 nsys-ai timeline-web <profile>
@@ -181,10 +186,10 @@ nsys-ai timeline-web <profile>
 ### §5.6 Mode 8 evidence adaptation
 
 Mode 8 (Diff) has two profiles but only **one after-timeline** is served. Run
-`evidence build` on the **after profile only** — never on the before profile.
+the §5.1 evidence step on the **after profile only** — never on the before profile.
 
 ```bash
-nsys-ai evidence build <after> --format json -o /tmp/findings.json
+nsys-ai analyze <after> --gpu <device_id> --format json -o /tmp/findings.json
 ```
 
 Then annotate `findings.json` with regression labels pulled from
@@ -400,9 +405,13 @@ Heavy skills (range-IEJoin: kernels × avg NVTX depth):
 
 | Skill | Trim trigger |
 |---|---|
-| `nvtx_layer_breakdown` | `nvtx.iteration_count > 1` OR `profile_span_ms > 30_000` |
+| `nvtx_layer_breakdown` | `nvtx.iteration_count > 1` OR full span > 30 s* |
 | `nvtx_kernel_map` | same |
-| `gpu_idle_gaps` | `profile_span_ms > 30_000` |
+| `gpu_idle_gaps` | full span > 30 s* |
+
+\* When `data_quality.auto_trim.applied == true` the top-level `profile_span_ms`
+is the trimmed window; read the actual span from
+`data_quality.auto_trim.profile_full_span_ms`.
 
 **First-open cache trap.** The cache builder materializes
 `nvtx_kernel_map.parquet` via the same range-IEJoin, so on NVTX-heavy

@@ -81,7 +81,7 @@ Soft cap: avoid suggesting >2 modes in one delivery.
 
 ## 6. Delivery
 
-Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summary:
+Follow `PRINCIPLES.md §5` for evidence + timeline URL. Then 3-part summary:
 
 1. **Root cause** — hotspot identity + quantified share:
    > "Top kernel `ampere_bf16_s16816gemm_bf16_128x128x32_ldg8_f2f_stages_32x3_nn`

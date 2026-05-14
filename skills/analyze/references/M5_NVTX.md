@@ -123,7 +123,7 @@ After delivery, suggest a second mode only if a distinct critical finding exists
 
 ## 6. Delivery
 
-Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summary:
+Follow `PRINCIPLES.md §5` for evidence + timeline URL. Then 3-part summary:
 
 1. **Root cause** — layer name + quantified % + mechanism:
    > "The `TransformerLayer.12.attn_fwd` region accounts for 34% of GPU time. Top kernel is

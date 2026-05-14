@@ -83,7 +83,7 @@ After delivery, suggest a second mode only if a distinct critical finding exists
 
 ## 6. Delivery
 
-Follow `PRINCIPLES.md §5` for evidence build + timeline URL. Then 3-part summary:
+Follow `PRINCIPLES.md §5` for evidence + timeline URL. Then 3-part summary:
 
 1. **Root cause** — stall class + quantified waste:
    > "GPU is idle 23% of profile time. `gpu_idle_gaps` attributes 78% of gaps to

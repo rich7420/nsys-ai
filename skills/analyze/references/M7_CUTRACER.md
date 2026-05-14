@@ -1,7 +1,7 @@
 # Mode 7 — CUTracer (SASS analysis)
 
 Reference for `/nsys-ai` Mode 7. **Read `PRINCIPLES.md` first** — §4 guards, §7 fail
-template, §10 checklist. **Evidence exception**: Mode 7 skips `evidence build` — see
+template, §10 checklist. **Evidence exception**: Mode 7 skips the §5.1 evidence step — see
 PRINCIPLES.md §5.5.
 
 ---
@@ -124,7 +124,7 @@ If `bottleneck = "unknown"` due to missing `.so`:
 
 ## 6. Delivery
 
-**Evidence**: Mode 7 skips `evidence build`. Open an unannotated timeline for context:
+**Evidence**: Mode 7 skips the §5.1 evidence step. Open an unannotated timeline for context:
 ```bash
 nsys-ai timeline-web <profile>
 ```
