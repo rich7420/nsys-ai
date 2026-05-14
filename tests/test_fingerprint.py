@@ -128,6 +128,60 @@ def test_distributed_single_device_stays_false():
     assert fp.distributed is False
 
 
+def test_distributed_empty_kernel_table_stays_false():
+    """Empty kernel table (no rows) must not flip distributed."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE NsightSchemaMeta (version INTEGER)")
+    c.execute("CREATE TABLE StringIds (value TEXT)")
+    c.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+        "(correlationId INTEGER, deviceId INTEGER)"
+    )
+    conn.commit()
+
+    fp = get_fingerprint(conn)
+    assert fp.distributed is False
+
+
+def test_distributed_kernel_table_missing_device_column_does_not_crash():
+    """Very old schemas may lack the deviceId column. Fallback must
+    swallow the OperationalError and leave distributed unchanged."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE NsightSchemaMeta (version INTEGER)")
+    c.execute("CREATE TABLE StringIds (value TEXT)")
+    c.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (correlationId INTEGER)"
+    )
+    c.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1)")
+    conn.commit()
+
+    fp = get_fingerprint(conn)
+    # Doesn't crash; remains False because the fallback query errored out.
+    assert fp.distributed is False
+
+
+def test_distributed_payload_schema_takes_precedence_over_fallback():
+    """When NVTX_PAYLOAD_SCHEMAS already proves NCCL, the kernel-fallback
+    must not run (or at least not change the outcome)."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE NsightSchemaMeta (version INTEGER)")
+    c.execute("CREATE TABLE StringIds (value TEXT)")
+    c.execute("CREATE TABLE NVTX_PAYLOAD_SCHEMAS (name TEXT)")
+    c.execute("INSERT INTO NVTX_PAYLOAD_SCHEMAS VALUES ('NCCL_thing')")
+    c.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+        "(correlationId INTEGER, deviceId INTEGER)"
+    )
+    c.execute("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1, 0)")
+    conn.commit()
+
+    fp = get_fingerprint(conn)
+    assert fp.distributed is True
+
+
 # ---------------------------------------------------------------------------
 # get_profile_id — content-derived stable identifier
 # ---------------------------------------------------------------------------
