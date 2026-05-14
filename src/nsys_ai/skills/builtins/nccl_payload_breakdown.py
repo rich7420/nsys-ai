@@ -1,0 +1,269 @@
+"""NCCL payload breakdown — decodes NVTX typed-payload binaryData.
+
+Nsight stores NCCL operation details (communicator ID, message size in
+bytes, peer rank, world size) as typed NVTX payloads. The schemas are
+declared in ``NVTX_PAYLOAD_SCHEMAS`` / ``NVTX_PAYLOAD_SCHEMA_ENTRIES``;
+the actual values for each event live in ``NVTX_EVENTS.binaryData`` as a
+raw byte blob.
+
+This skill decodes that blob and aggregates per schema category. It is the
+foundation for downstream NCCL-aware skills (``nccl_bandwidth_utilization``,
+etc.) — without real message sizes from the profile, those have to estimate.
+
+Binary layout (verified against Nsight 2026.x profiles):
+  bytes 0-3   uint32  domainId
+  bytes 4-7   uint32  (reserved / flags)
+  bytes 8-11  uint32  schemaId
+  bytes 12-15 uint32  (reserved / flags)
+  bytes 16-23 uint64  payloadSize (matches NVTX_PAYLOAD_SCHEMAS.payloadSize)
+  bytes 24-31 uint64  totalSize (= 32 + payloadSize)
+  bytes 32+   payload (fields per NVTX_PAYLOAD_SCHEMA_ENTRIES, by `offset`)
+"""
+
+import logging
+import struct
+from collections import defaultdict
+
+from nsys_ai.connection import DB_ERRORS, wrap_connection
+
+from ..base import Skill
+
+_log = logging.getLogger(__name__)
+
+# NVTX payload field type code → byte width. Subset Nsight uses for NCCL.
+# Type 5 = uint32 (e.g. rank count, rank id, device id, peer rank).
+# Type 18 = uint64 (NCCL communicator ID).
+# Type 22 = uint64 (message size in bytes).
+_TYPE_SIZES = {5: 4, 18: 8, 22: 8}
+
+# 32-byte event header layout (little-endian).
+_HEADER_FMT = "<IIIIQQ"
+_HEADER_SIZE = 32
+
+
+def _load_schemas(adapter) -> dict[int, dict]:
+    """Build {schemaId: {"payload_size": int, "fields": [{offset,type,name}, ...]}}.
+
+    Accepts either a wrapped adapter (uniform .execute().fetchall() across
+    sqlite/duckdb) or a raw sqlite3 connection — :func:`wrap_connection` is
+    a no-op when given an adapter, so the public callsite can hand us
+    whichever the CLI provided.
+    """
+    schemas: dict[int, dict] = {}
+    try:
+        for sid, plen in adapter.execute(
+            "SELECT DISTINCT schemaId, payloadSize FROM NVTX_PAYLOAD_SCHEMAS"
+        ).fetchall():
+            schemas[sid] = {"payload_size": plen, "fields": []}
+        # `offset` is a DuckDB reserved keyword and `type` is a soft keyword;
+        # both must be quoted for the query to parse against the DuckDB cache
+        # (sqlite tolerates either form). Without quoting, the query raises
+        # `Parser Error: syntax error at or near "FROM"` and `DB_ERRORS`
+        # catches it silently — leaving `fields=[]` for every schema and
+        # making every binaryData row look undecodable.
+        for sid, idx, ftype, fname, foff in adapter.execute(
+            'SELECT DISTINCT schemaId, idx, "type", name, "offset" '
+            "FROM NVTX_PAYLOAD_SCHEMA_ENTRIES ORDER BY schemaId, idx"
+        ).fetchall():
+            if sid in schemas:
+                # First field's offset is NULL in the table (means 0).
+                schemas[sid]["fields"].append(
+                    {"idx": idx, "type": ftype, "name": fname, "offset": foff or 0}
+                )
+    except DB_ERRORS:
+        _log.debug("No NVTX_PAYLOAD_SCHEMAS — profile lacks typed payloads", exc_info=True)
+
+    # Safety net: if schemas loaded but every fields[] is empty, the entries
+    # query silently failed (the original bug here was DuckDB rejecting
+    # `offset` as a reserved keyword, swallowed by DB_ERRORS). Warn so the
+    # next regression doesn't waste a debug round-trip.
+    if schemas and all(not s["fields"] for s in schemas.values()):
+        _log.warning(
+            "NVTX_PAYLOAD_SCHEMAS loaded (%d) but NVTX_PAYLOAD_SCHEMA_ENTRIES "
+            "returned no fields — entries query likely failed silently.",
+            len(schemas),
+        )
+    return schemas
+
+
+def _classify(field_names: list[str]) -> str:
+    """Categorize a schema by its field set."""
+    fs = set(field_names)
+    has_msg = "Message size [bytes]" in fs
+    has_peer = "Peer rank" in fs
+    has_world = "No. of ranks" in fs
+    if has_world:
+        return "init"
+    if has_msg and has_peer:
+        return "p2p"           # ncclSend / ncclRecv with peer
+    if has_msg:
+        return "collective"    # ncclAllReduce / ncclAllGather etc.
+    return "group_marker"      # ncclGroupStart / ncclGroupEnd (comm-id only)
+
+
+def _decode_row(bd, schemas: dict[int, dict]) -> dict | None:
+    """Decode one binaryData blob → {schema_id, fields: {name: value}}.
+
+    Accepts either bytes (sqlite3 BLOB) or str (DuckDB returns BLOB columns
+    hex-encoded — twice the byte length, only chars [0-9a-fA-F]).
+    """
+    if not bd:
+        return None
+    if isinstance(bd, str):
+        # DuckDB path: hex-decode back to raw bytes.
+        try:
+            bd = bytes.fromhex(bd)
+        except ValueError:
+            return None
+    if len(bd) < _HEADER_SIZE:
+        return None
+    try:
+        _domain, _, schema_id, _, payload_size, _ = struct.unpack_from(_HEADER_FMT, bd, 0)
+    except struct.error:
+        return None
+    if schema_id not in schemas or len(bd) < _HEADER_SIZE + payload_size:
+        return None
+    out: dict = {"schema_id": schema_id}
+    fields: dict[str, int] = {}
+    for f in schemas[schema_id]["fields"]:
+        sz = _TYPE_SIZES.get(f["type"])
+        if sz is None:
+            continue
+        off = _HEADER_SIZE + f["offset"]
+        fmt = "<I" if sz == 4 else "<Q"
+        try:
+            (val,) = struct.unpack_from(fmt, bd, off)
+            fields[f["name"]] = val
+        except struct.error:
+            pass
+    out["fields"] = fields
+    return out
+
+
+def _percentile(sorted_vals: list[int], p: float) -> int:
+    """Linear-interpolation percentile on a pre-sorted list."""
+    if not sorted_vals:
+        return 0
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    pos = p * (n - 1)
+    lo = int(pos)
+    if lo == n - 1:
+        return sorted_vals[lo]
+    frac = pos - lo
+    return int(sorted_vals[lo] + frac * (sorted_vals[lo + 1] - sorted_vals[lo]))
+
+
+def _execute(conn, **kwargs) -> list[dict]:
+    adapter = wrap_connection(conn)
+    schemas = _load_schemas(adapter)
+    if not schemas:
+        return [{"error": "No NVTX_PAYLOAD_SCHEMAS in this profile (NCCL typed payloads not captured)"}]
+
+    # Per-schema buckets.
+    per_schema: dict[int, dict] = defaultdict(
+        lambda: {"count": 0, "msg_sizes": [], "communicators": set()}
+    )
+    decoded = 0
+    skipped = 0
+
+    for (bd,) in adapter.execute(
+        "SELECT binaryData FROM NVTX_EVENTS WHERE binaryData IS NOT NULL"
+    ).fetchall():
+        row = _decode_row(bd, schemas)
+        if row is None:
+            skipped += 1
+            continue
+        decoded += 1
+        sid = row["schema_id"]
+        bucket = per_schema[sid]
+        bucket["count"] += 1
+        f = row["fields"]
+        if "Message size [bytes]" in f:
+            bucket["msg_sizes"].append(f["Message size [bytes]"])
+        if "NCCL communicator ID" in f:
+            bucket["communicators"].add(f["NCCL communicator ID"])
+
+    rows: list[dict] = []
+    total_bytes = 0
+    for sid, bucket in sorted(per_schema.items()):
+        field_names = [fl["name"] for fl in schemas[sid]["fields"]]
+        category = _classify(field_names)
+        sizes = sorted(bucket["msg_sizes"])
+        msg_total = sum(sizes)
+        total_bytes += msg_total
+        row = {
+            "schema_id": sid,
+            "category": category,
+            "field_set": field_names,
+            "count": bucket["count"],
+            "distinct_communicators": len(bucket["communicators"]),
+        }
+        if sizes:
+            row["msg_size_bytes_total"] = msg_total
+            row["msg_size_bytes_min"] = sizes[0]
+            row["msg_size_bytes_p50"] = _percentile(sizes, 0.50)
+            row["msg_size_bytes_p99"] = _percentile(sizes, 0.99)
+            row["msg_size_bytes_max"] = sizes[-1]
+        rows.append(row)
+
+    # Prepend a summary row so consumers see profile-wide totals.
+    summary = {
+        "_summary": True,
+        "total_payload_events": decoded,
+        "skipped_events": skipped,
+        "total_bytes_all": total_bytes,
+        "total_gib_all": round(total_bytes / (1024**3), 2),
+        "distinct_schemas": len(per_schema),
+    }
+    return [summary, *rows]
+
+
+def _format(rows: list[dict]) -> str:
+    if not rows or "error" in rows[0]:
+        return f"(NCCL payload: {rows[0].get('error', 'no data') if rows else 'no data'})"
+    s = rows[0]
+    lines = [
+        "── NCCL Payload Breakdown ──",
+        f"  Total payload events:  {s['total_payload_events']:,}"
+        + (f"  ({s['skipped_events']:,} undecodable)" if s["skipped_events"] else ""),
+        f"  Total bytes transferred: {s['total_gib_all']} GiB",
+        f"  Distinct schemas:      {s['distinct_schemas']}",
+        "",
+    ]
+    for r in rows[1:]:
+        sid = r["schema_id"]
+        cat = r["category"]
+        cnt = r["count"]
+        comms = r["distinct_communicators"]
+        head = f"  [{cat:<14}] schema={sid}  calls={cnt:>8,}  communicators={comms}"
+        if "msg_size_bytes_total" in r:
+            tot_gib = r["msg_size_bytes_total"] / (1024**3)
+            p50_mib = r["msg_size_bytes_p50"] / (1024**2)
+            p99_mib = r["msg_size_bytes_p99"] / (1024**2)
+            head += (
+                f"\n      msg_size: p50={p50_mib:.2f} MiB  p99={p99_mib:.2f} MiB"
+                f"   total={tot_gib:.2f} GiB"
+            )
+        lines.append(head)
+    return "\n".join(lines)
+
+
+SKILL = Skill(
+    name="nccl_payload_breakdown",
+    title="NCCL Payload Breakdown (message sizes via NVTX typed payloads)",
+    description=(
+        "Decodes NCCL typed-payload NVTX events to extract real per-collective "
+        "message sizes, peer ranks, and communicator IDs from NVTX_EVENTS.binaryData. "
+        "Distinguishes init, group markers, collective, and p2p operations by their "
+        "payload schema. Foundation for bandwidth-utilization analysis."
+    ),
+    category="communication",
+    execute_fn=_execute,
+    format_fn=_format,
+    tags=[
+        "nccl", "payload", "message-size", "bandwidth", "communication",
+        "distributed", "p2p", "collective",
+    ],
+)
