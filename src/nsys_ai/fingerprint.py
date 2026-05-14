@@ -132,8 +132,9 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
             pass
 
     # Fallback: NVTX_PAYLOAD_SCHEMAS doesn't always register collective schemas
-    # (observed on fastvideo Wan-T2V profiles, PyTorch 2.11). Multi-device
-    # kernel activity is a robust signal for single-node multi-rank training.
+    # (observed on some PyTorch versions where NCCL skips the typed-payload
+    # path). Multi-device kernel activity is a robust signal for single-node
+    # multi-rank training.
     if not distributed and "CUPTI_ACTIVITY_KIND_KERNEL" in tables:
         try:
             cur = adapter.execute(

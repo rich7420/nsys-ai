@@ -5,6 +5,11 @@ Covers the v0.2.4 additions:
 - `same_stream_compute_pct` / `same_stream_nccl_pct` quantify the
   proportion behind `same_stream_diagnosis`
 
+Note: several tests mutate the `minimal_nsys_conn` fixture (INSERT/UPDATE
+extra rows). This is safe today because conftest declares it function-scoped
+— each test gets a fresh in-memory connection. If anyone bumps the fixture
+to session scope, these mutations will leak between tests.
+
 The conftest's `minimal_nsys_conn` seed places 5 kernels on device 0:
 
     streamId=7  compute (cId=1,  shortName=1  → kernel_A)
@@ -70,7 +75,7 @@ def test_same_stream_proportions(minimal_nsys_conn):
     )
 
 
-def test_no_same_stream_no_proportions(minimal_nsys_conn):
+def test_clean_multi_stream_does_not_fire_diagnostic(minimal_nsys_conn):
     """Move the same-stream NCCL kernel to stream 8 so no stream has both
     compute and NCCL. The diagnostic must not fire and the proportions
     must not be emitted."""

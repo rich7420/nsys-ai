@@ -14,6 +14,12 @@ from ..base import Skill, SkillParam
 
 _log = logging.getLogger(__name__)
 
+# Case-insensitive NCCL kernel-name match against StringIds.value, reused
+# across three queries below. Keep the OR-of-LIKE form (rather than
+# `LOWER(...) LIKE`) so SQLite/DuckDB can still use a string-prefix index
+# if one exists on StringIds.value.
+_NCCL_LIKE = "(s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')"
+
 
 def _execute(conn, **kwargs):
     from ...overlap import overlap_analysis
@@ -44,10 +50,8 @@ def _execute(conn, **kwargs):
             same_stream = prof._duckdb_query(
                 f"""
                 SELECT k.streamId,
-                    SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
-                        THEN 1 ELSE 0 END) AS nccl_count,
-                    SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
-                        THEN 1 ELSE 0 END) AS compute_count
+                    SUM(CASE WHEN {_NCCL_LIKE} THEN 1 ELSE 0 END) AS nccl_count,
+                    SUM(CASE WHEN NOT {_NCCL_LIKE} THEN 1 ELSE 0 END) AS compute_count
                 FROM {kernel_tbl} k
                 JOIN StringIds s ON k.shortName = s.id
                 WHERE k.deviceId = ? {trim_clause}
@@ -65,10 +69,8 @@ def _execute(conn, **kwargs):
                 totals = prof._duckdb_query(
                     f"""
                     SELECT
-                        SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
-                            THEN 1 ELSE 0 END) AS nccl_total,
-                        SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
-                            THEN 1 ELSE 0 END) AS compute_total
+                        SUM(CASE WHEN {_NCCL_LIKE} THEN 1 ELSE 0 END) AS nccl_total,
+                        SUM(CASE WHEN NOT {_NCCL_LIKE} THEN 1 ELSE 0 END) AS compute_total
                     FROM {kernel_tbl} k
                     JOIN StringIds s ON k.shortName = s.id
                     WHERE k.deviceId = ? {trim_clause}
@@ -93,7 +95,10 @@ def _execute(conn, **kwargs):
 
     # Surface other GPUs that exist in the profile. Otherwise a multi-rank
     # single-node profile is invisible to the agent (which only sees
-    # device=0 by default).
+    # device=0 by default). Intentionally profile-wide — NOT window-scoped —
+    # because "which devices exist" is a topology property, not a per-window
+    # one. A trim window that excludes a rank's activity should not hide
+    # that rank from the device list.
     try:
         kernel_tbl = prof.schema.kernel_table
         if kernel_tbl:
@@ -244,12 +249,18 @@ SKILL = Skill(
     description=(
         "Quantifies how much GPU compute overlaps with NCCL communication. "
         "Shows compute-only, NCCL-only, overlap, and idle time. "
-        "overlap_pct > 60% means NCCL is well-hidden behind compute."
+        "overlap_pct > 60% means NCCL is well-hidden behind compute. "
+        "Also detects same-stream serialization (compute and NCCL sharing a "
+        "single stream, which blocks overlap) and surfaces multi-GPU presence "
+        "via present_devices for profiles with more than one rank."
     ),
     category="communication",
     execute_fn=_execute,
     format_fn=_format,
     to_findings_fn=_to_findings,
     params=[SkillParam("device", "GPU device ID", "int", False, 0)],
-    tags=["overlap", "nccl", "compute", "communication", "distributed"],
+    tags=[
+        "overlap", "nccl", "compute", "communication", "distributed",
+        "multi-gpu", "same-stream", "stream-serialization",
+    ],
 )
