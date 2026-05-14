@@ -18,6 +18,12 @@ Binary layout (verified against Nsight 2026.x profiles):
   bytes 16-23 uint64  payloadSize (matches NVTX_PAYLOAD_SCHEMAS.payloadSize)
   bytes 24-31 uint64  totalSize (= 32 + payloadSize)
   bytes 32+   payload (fields per NVTX_PAYLOAD_SCHEMA_ENTRIES, by `offset`)
+
+Output convention:
+  Row 0 is a SUMMARY row with ``_summary: True`` carrying profile-wide
+  totals (``total_payload_events``, ``total_bytes_all``, etc.). Rows 1..N
+  are per-schema breakdowns. Consumers should skip ``rows[0]`` (or check
+  ``r.get('_summary')``) when iterating per-schema data.
 """
 
 import logging
@@ -177,7 +183,8 @@ def _execute(conn, **kwargs) -> list[dict]:
     # Honor the standard trim convention documented in PRINCIPLES.md §9.
     # Either both bounds set or neither; partial trim falls through to
     # whole-profile (consistent with how iteration_detail / overlap_breakdown
-    # handle the same kwargs).
+    # handle the same kwargs). Partial-bound passes log a WARNING so users
+    # know their intent was dropped rather than silently honored.
     trim_start = kwargs.get("trim_start_ns")
     trim_end = kwargs.get("trim_end_ns")
     trim_clause = ""
@@ -186,6 +193,13 @@ def _execute(conn, **kwargs) -> list[dict]:
         # NVTX event overlaps the window if start <= trim_end AND end >= trim_start.
         trim_clause = ' AND start <= ? AND "end" >= ?'
         trim_params = [int(trim_end), int(trim_start)]
+    elif trim_start is not None or trim_end is not None:
+        _log.warning(
+            "nccl_payload_breakdown: partial trim bounds dropped — both "
+            "trim_start_ns and trim_end_ns must be set to scope the query "
+            "(got start=%r, end=%r). Returning whole-profile aggregation.",
+            trim_start, trim_end,
+        )
 
     # Per-schema buckets.
     per_schema: dict[int, dict] = defaultdict(

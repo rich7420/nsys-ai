@@ -402,11 +402,55 @@ def test_skill_trim_partial_bounds_falls_through_to_whole_profile():
     """Only one of trim_start_ns / trim_end_ns set → trim ignored
     (consistent with overlap_breakdown / iteration_detail behavior)."""
     conn = _build_db_with_nccl_payloads()
-    full = SKILL.execute_fn(conn)["total_payload_events"] if False else SKILL.execute_fn(conn)[0]["total_payload_events"]
+    full = SKILL.execute_fn(conn)[0]["total_payload_events"]
     # Pass only trim_start_ns → should NOT filter (whole profile returned).
     partial = SKILL.execute_fn(conn, trim_start_ns=999_999_999_999)[0]["total_payload_events"]
     assert partial == full, (
         f"Partial-bounds trim should fall through; got {partial} vs full {full}"
+    )
+
+
+def test_skill_warns_on_partial_trim_bounds(caplog):
+    """A user passing only one trim bound is almost certainly a mistake —
+    must log a WARNING so the silent fall-through doesn't mask the bug."""
+    import logging
+
+    conn = _build_db_with_nccl_payloads()
+    with caplog.at_level(logging.WARNING, logger="nsys_ai.skills.builtins.nccl_payload_breakdown"):
+        SKILL.execute_fn(conn, trim_start_ns=12345)
+    assert any(
+        "partial trim bounds dropped" in rec.message for rec in caplog.records
+    ), f"expected WARNING about partial trim; got: {[r.message for r in caplog.records]}"
+
+
+def test_format_handles_summary_only_no_data_rows():
+    """When the schemas exist but no events match (e.g. heavy trim), the
+    summary row is the only row. The formatter must not crash and must
+    produce a recognisable output."""
+    conn = _build_db_with_nccl_payloads()
+    # Trim window in the distant past — captures zero events.
+    rows = SKILL.execute_fn(conn, trim_start_ns=-1_000_000, trim_end_ns=-1)
+    assert rows[0]["_summary"] is True
+    assert rows[0]["total_payload_events"] == 0
+    # Format must not crash on summary-only output.
+    text = SKILL.format_fn(rows)
+    assert "NCCL Payload Breakdown" in text
+    assert "Total payload events:  0" in text
+
+
+def test_summary_totals_consistent_with_per_schema_totals():
+    """`_summary.total_bytes_all` MUST equal the sum of per-schema
+    `msg_size_bytes_total` — any drift indicates the aggregation logic
+    diverged between the summary path and the per-row path."""
+    conn = _build_db_with_nccl_payloads()
+    rows = SKILL.execute_fn(conn)
+    summary = rows[0]
+    per_schema_total = sum(
+        r.get("msg_size_bytes_total", 0) for r in rows[1:]
+    )
+    assert summary["total_bytes_all"] == per_schema_total, (
+        f"summary total {summary['total_bytes_all']} != "
+        f"sum of per-schema totals {per_schema_total}"
     )
 
 
