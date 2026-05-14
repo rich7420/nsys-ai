@@ -174,6 +174,19 @@ def _execute(conn, **kwargs) -> list[dict]:
     if not schemas:
         return [{"error": "No NVTX_PAYLOAD_SCHEMAS in this profile (NCCL typed payloads not captured)"}]
 
+    # Honor the standard trim convention documented in PRINCIPLES.md §9.
+    # Either both bounds set or neither; partial trim falls through to
+    # whole-profile (consistent with how iteration_detail / overlap_breakdown
+    # handle the same kwargs).
+    trim_start = kwargs.get("trim_start_ns")
+    trim_end = kwargs.get("trim_end_ns")
+    trim_clause = ""
+    trim_params: list = []
+    if trim_start is not None and trim_end is not None:
+        # NVTX event overlaps the window if start <= trim_end AND end >= trim_start.
+        trim_clause = ' AND start <= ? AND "end" >= ?'
+        trim_params = [int(trim_end), int(trim_start)]
+
     # Per-schema buckets.
     per_schema: dict[int, dict] = defaultdict(
         lambda: {"count": 0, "msg_sizes": [], "communicators": set()}
@@ -182,7 +195,8 @@ def _execute(conn, **kwargs) -> list[dict]:
     skipped = 0
 
     for (bd,) in adapter.execute(
-        "SELECT binaryData FROM NVTX_EVENTS WHERE binaryData IS NOT NULL"
+        f"SELECT binaryData FROM NVTX_EVENTS WHERE binaryData IS NOT NULL{trim_clause}",
+        trim_params,
     ).fetchall():
         row = _decode_row(bd, schemas)
         if row is None:

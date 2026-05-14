@@ -350,6 +350,66 @@ def test_header_size_matches_format():
     assert _HEADER_SIZE == struct.calcsize(_HEADER_FMT)
 
 
+def test_skill_respects_trim_window():
+    """Passing trim_start_ns / trim_end_ns must scope aggregation to events
+    whose [start, end] overlaps the window. Required by PRINCIPLES.md §9
+    so agents trimming to one iteration get scoped NCCL payload data."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute(
+        "CREATE TABLE NVTX_PAYLOAD_SCHEMAS "
+        "(domainId INTEGER, schemaId INTEGER, name TEXT, type INTEGER, "
+        " flags INTEGER, numEntries INTEGER, payloadSize INTEGER, alignTo INTEGER)"
+    )
+    c.execute("INSERT INTO NVTX_PAYLOAD_SCHEMAS VALUES (1, 100, NULL, 1, NULL, 2, 16, NULL)")
+    c.execute(
+        "CREATE TABLE NVTX_PAYLOAD_SCHEMA_ENTRIES "
+        "(domainId INTEGER, schemaId INTEGER, idx INTEGER, flags INTEGER, "
+        " type INTEGER, name TEXT, description TEXT, arrayOrUnionDetail INTEGER, offset INTEGER)"
+    )
+    c.execute("INSERT INTO NVTX_PAYLOAD_SCHEMA_ENTRIES VALUES (1, 100, 0, NULL, 18, 'NCCL communicator ID', NULL, NULL, NULL)")
+    c.execute("INSERT INTO NVTX_PAYLOAD_SCHEMA_ENTRIES VALUES (1, 100, 1, NULL, 22, 'Message size [bytes]', NULL, NULL, 8)")
+    c.execute(
+        'CREATE TABLE NVTX_EVENTS (start INTEGER, "end" INTEGER, binaryData BLOB)'
+    )
+    # 3 events at three different time windows: 0-100, 1000-1100, 2000-2100.
+    for start, msg_size in ((0, 1024), (1000, 2048), (2000, 4096)):
+        payload = struct.pack("<QQ", 0xCAFE_BABE, msg_size)
+        c.execute(
+            "INSERT INTO NVTX_EVENTS VALUES (?, ?, ?)",
+            (start, start + 100, _pack_event(100, payload)),
+        )
+    conn.commit()
+
+    # Without trim: all 3 events
+    rows_all = SKILL.execute_fn(conn)
+    assert rows_all[0]["total_payload_events"] == 3
+
+    # Trim to [500, 1500] — only the middle event (1000-1100) overlaps
+    rows_mid = SKILL.execute_fn(conn, trim_start_ns=500, trim_end_ns=1500)
+    assert rows_mid[0]["total_payload_events"] == 1
+    # Confirm the middle message size (2048) is the only one captured
+    by_sid = {r["schema_id"]: r for r in rows_mid[1:]}
+    assert by_sid[100]["msg_size_bytes_total"] == 2048
+
+    # Trim to [50, 2050] — captures all three (each event 100ns wide, all
+    # within or overlapping this 2 µs window)
+    rows_wide = SKILL.execute_fn(conn, trim_start_ns=50, trim_end_ns=2050)
+    assert rows_wide[0]["total_payload_events"] == 3
+
+
+def test_skill_trim_partial_bounds_falls_through_to_whole_profile():
+    """Only one of trim_start_ns / trim_end_ns set → trim ignored
+    (consistent with overlap_breakdown / iteration_detail behavior)."""
+    conn = _build_db_with_nccl_payloads()
+    full = SKILL.execute_fn(conn)["total_payload_events"] if False else SKILL.execute_fn(conn)[0]["total_payload_events"]
+    # Pass only trim_start_ns → should NOT filter (whole profile returned).
+    partial = SKILL.execute_fn(conn, trim_start_ns=999_999_999_999)[0]["total_payload_events"]
+    assert partial == full, (
+        f"Partial-bounds trim should fall through; got {partial} vs full {full}"
+    )
+
+
 def test_skill_counts_distinct_communicators():
     """When two events share a communicator ID, distinct_communicators must
     not double-count. When they differ, it must reflect both."""
