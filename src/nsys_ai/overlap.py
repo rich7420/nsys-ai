@@ -5,9 +5,12 @@ Quantifies how much GPU compute overlaps with NCCL communication,
 detects training iterations, and breaks down collective operations.
 """
 
+import logging
 from collections import defaultdict
 
 from .profile import Profile
+
+log = logging.getLogger(__name__)
 
 # ── NCCL kernel classification ──────────────────────────────────────
 
@@ -45,38 +48,146 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
         idle_ms:          Time no kernels are running
         total_ms:         Wall-clock span
     """
+    if _has_duckdb(prof):
+        try:
+            sql_result = _overlap_analysis_sql(prof, device, trim)
+            if sql_result is not None:
+                return sql_result
+            return _no_kernels_diag(prof, device, trim)
+        except Exception as e:
+            log.warning(
+                "overlap_analysis SQL path failed (%s); falling back to Python interval merge",
+                e,
+            )
+
+    return _overlap_analysis_python(prof, device, trim)
+
+
+def _has_duckdb(prof: Profile) -> bool:
+    from .connection import DuckDBAdapter, wrap_connection
+
+    conn = prof.db if prof.db is not None else prof.conn
+    return isinstance(wrap_connection(conn), DuckDBAdapter)
+
+
+def _overlap_analysis_sql(
+    prof: Profile, device: int | None, trim: tuple[int, int] | None
+) -> dict | None:
+    """SQL sweep-line implementation of overlap_analysis.
+
+    Pushes the entire interval-merge + intersection into a single DuckDB
+    query — converting every kernel into a (+1/-1) start/end event,
+    cumulatively summing per category to track concurrent counts, and
+    aggregating duration buckets via LEAD-based windowing. Returns ``None``
+    when no kernels match so the caller can produce the standard diagnostic
+    payload; raises on SQL errors so the caller can fall back to Python.
+    """
+    kernel_table = prof.schema.kernel_table
+    if not kernel_table:
+        return None
+
+    where = ["s.value IS NOT NULL"]
+    params: list = []
+    if device is not None:
+        where.append("k.deviceId = ?")
+        params.append(device)
+    if trim:
+        where.append("k.start >= ? AND k.[end] <= ?")
+        params.extend(trim)
+    where_sql = " AND ".join(where)
+
+    sql = f"""
+        WITH classified AS (
+            SELECT
+                k.start AS ts_in,
+                k.[end] AS ts_out,
+                CASE WHEN lower(s.value) LIKE '%nccl%' THEN 1 ELSE 0 END AS is_nccl
+            FROM {kernel_table} k
+            JOIN StringIds s ON k.shortName = s.id
+            WHERE {where_sql}
+        ),
+        counts AS (
+            SELECT
+                COALESCE(SUM(CASE WHEN is_nccl = 0 THEN 1 ELSE 0 END), 0) AS compute_kernels,
+                COALESCE(SUM(CASE WHEN is_nccl = 1 THEN 1 ELSE 0 END), 0) AS nccl_kernels,
+                MIN(ts_in)  AS span_start,
+                MAX(ts_out) AS span_end
+            FROM classified
+        ),
+        events AS (
+            SELECT ts_in  AS ts,  (1 - is_nccl) AS d_compute,  is_nccl  AS d_nccl FROM classified
+            UNION ALL
+            SELECT ts_out AS ts, -(1 - is_nccl) AS d_compute, -is_nccl AS d_nccl FROM classified
+        ),
+        agg AS (
+            SELECT ts, SUM(d_compute) AS d_compute, SUM(d_nccl) AS d_nccl
+            FROM events
+            GROUP BY ts
+        ),
+        sweep AS (
+            SELECT
+                ts,
+                LEAD(ts) OVER (ORDER BY ts) AS next_ts,
+                SUM(d_compute) OVER (ORDER BY ts ROWS UNBOUNDED PRECEDING) AS compute_count,
+                SUM(d_nccl)    OVER (ORDER BY ts ROWS UNBOUNDED PRECEDING) AS nccl_count
+            FROM agg
+        ),
+        times AS (
+            SELECT
+                COALESCE(SUM(CASE WHEN compute_count > 0 THEN (next_ts - ts) ELSE 0 END), 0) AS compute_ns,
+                COALESCE(SUM(CASE WHEN nccl_count    > 0 THEN (next_ts - ts) ELSE 0 END), 0) AS nccl_ns,
+                COALESCE(SUM(CASE WHEN compute_count > 0 AND nccl_count > 0
+                                  THEN (next_ts - ts) ELSE 0 END), 0) AS overlap_ns
+            FROM sweep
+            WHERE next_ts IS NOT NULL
+        )
+        SELECT c.compute_kernels, c.nccl_kernels, c.span_start, c.span_end,
+               t.compute_ns, t.nccl_ns, t.overlap_ns
+        FROM counts c, times t
+    """
+    rows = prof._duckdb_query(sql, params)
+    if not rows:
+        return None
+    r = rows[0]
+    if r["compute_kernels"] == 0 and r["nccl_kernels"] == 0:
+        return None
+    if r["span_start"] is None or r["span_end"] is None:
+        return None
+
+    span_start = int(r["span_start"])
+    span_end = int(r["span_end"])
+    compute_ns = int(r["compute_ns"] or 0)
+    nccl_ns = int(r["nccl_ns"] or 0)
+    overlap_ns = int(r["overlap_ns"] or 0)
+    total_ns = span_end - span_start
+    compute_only_ns = compute_ns - overlap_ns
+    nccl_only_ns = nccl_ns - overlap_ns
+    idle_ns = total_ns - compute_only_ns - nccl_only_ns - overlap_ns
+
+    return {
+        "compute_only_ms": round(compute_only_ns / 1e6, 2),
+        "nccl_only_ms": round(nccl_only_ns / 1e6, 2),
+        "overlap_ms": round(overlap_ns / 1e6, 2),
+        "idle_ms": round(max(0, idle_ns) / 1e6, 2),
+        "total_ms": round(total_ns / 1e6, 2),
+        "overlap_pct": round(100 * overlap_ns / nccl_ns, 1) if nccl_ns else 0,
+        "compute_kernels": int(r["compute_kernels"]),
+        "nccl_kernels": int(r["nccl_kernels"]),
+        "span_start_ns": span_start,
+        "span_end_ns": span_end,
+    }
+
+
+def _overlap_analysis_python(
+    prof: Profile, device: int | None, trim: tuple[int, int] | None
+) -> dict:
+    """Original interval-merge implementation. Retained as fallback for
+    SQLite-only profiles (no DuckDB) and as a backstop if the SQL path
+    raises unexpectedly."""
     kernels = prof.kernels(device, trim)
     if not kernels:
-        # Provide diagnostic info so agents can self-correct
-        diag = {"error": "no kernels found"}
-        diag["requested_device"] = device
-        if trim:
-            diag["requested_trim_ns"] = list(trim)
-        # Query available devices with kernel counts
-        try:
-            kernel_tbl = prof.schema.kernel_table
-            dev_rows = prof._duckdb_query(
-                f"SELECT deviceId, COUNT(*) AS cnt FROM {kernel_tbl} GROUP BY deviceId ORDER BY deviceId"
-            )
-            diag["available_devices"] = {r["deviceId"]: r["cnt"] for r in dev_rows}
-            total = sum(r["cnt"] for r in dev_rows)
-            if total > 0 and device not in diag["available_devices"]:
-                diag["hint"] = (
-                    f"Device {device} has no kernels. "
-                    f"Try: {', '.join(f'-p device={d}' for d in sorted(diag['available_devices']))}"
-                )
-            elif total > 0 and trim:
-                diag["hint"] = (
-                    f"Device {device} has {diag['available_devices'].get(device, 0)} kernels "
-                    f"but none in the requested trim window. Try without --trim."
-                )
-            else:
-                diag["hint"] = "Profile contains no GPU kernel data."
-        except Exception:
-            diag["hint"] = "Could not query device info."
-        return diag
+        return _no_kernels_diag(prof, device, trim)
 
-    # Separate compute vs NCCL intervals
     compute_intervals = []
     nccl_intervals = []
     for k in kernels:
@@ -91,15 +202,11 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
     span_end = max(k["end"] for k in kernels)
     total_ns = span_end - span_start
 
-    # Merge overlapping intervals within each category
     compute_merged = merge_intervals(compute_intervals)
     nccl_merged = merge_intervals(nccl_intervals)
 
-    # Calculate coverage
     compute_ns = total_covered(compute_merged)
     nccl_ns = total_covered(nccl_merged)
-
-    # Overlap = time covered by BOTH compute and NCCL
     overlap_ns = intersection_coverage(compute_merged, nccl_merged)
 
     compute_only_ns = compute_ns - overlap_ns
@@ -118,6 +225,39 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
         "span_start_ns": span_start,
         "span_end_ns": span_end,
     }
+
+
+def _no_kernels_diag(
+    prof: Profile, device: int | None, trim: tuple[int, int] | None
+) -> dict:
+    """Build the diagnostic dict returned when no kernels match the
+    requested device/trim combination."""
+    diag: dict = {"error": "no kernels found", "requested_device": device}
+    if trim:
+        diag["requested_trim_ns"] = list(trim)
+    try:
+        kernel_tbl = prof.schema.kernel_table
+        dev_rows = prof._duckdb_query(
+            f"SELECT deviceId, COUNT(*) AS cnt FROM {kernel_tbl} "
+            "GROUP BY deviceId ORDER BY deviceId"
+        )
+        diag["available_devices"] = {r["deviceId"]: r["cnt"] for r in dev_rows}
+        total = sum(r["cnt"] for r in dev_rows)
+        if total > 0 and device not in diag["available_devices"]:
+            diag["hint"] = (
+                f"Device {device} has no kernels. "
+                f"Try: {', '.join(f'-p device={d}' for d in sorted(diag['available_devices']))}"
+            )
+        elif total > 0 and trim:
+            diag["hint"] = (
+                f"Device {device} has {diag['available_devices'].get(device, 0)} kernels "
+                f"but none in the requested trim window. Try without --trim."
+            )
+        else:
+            diag["hint"] = "Profile contains no GPU kernel data."
+    except Exception:
+        diag["hint"] = "Could not query device info."
+    return diag
 
 
 # ── NCCL collective breakdown ──────────────────────────────────────
