@@ -131,6 +131,21 @@ def get_fingerprint(conn: typing.Any) -> ProfileFingerprint:
         except DB_ERRORS:
             pass
 
+    # Fallback: NVTX_PAYLOAD_SCHEMAS doesn't always register collective schemas
+    # (observed on some PyTorch versions where NCCL skips the typed-payload
+    # path). Multi-device kernel activity is a robust signal for single-node
+    # multi-rank training.
+    if not distributed and "CUPTI_ACTIVITY_KIND_KERNEL" in tables:
+        try:
+            cur = adapter.execute(
+                "SELECT COUNT(DISTINCT deviceId) FROM CUPTI_ACTIVITY_KIND_KERNEL"
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None and int(row[0]) > 1:
+                distributed = True
+        except DB_ERRORS:
+            pass
+
     return ProfileFingerprint(
         framework=framework,
         distributed=distributed,

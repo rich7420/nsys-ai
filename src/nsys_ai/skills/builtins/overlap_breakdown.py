@@ -14,6 +14,12 @@ from ..base import Skill, SkillParam
 
 _log = logging.getLogger(__name__)
 
+# Case-insensitive NCCL kernel-name match against StringIds.value, reused
+# across three queries below. Keep the OR-of-LIKE form (rather than
+# `LOWER(...) LIKE`) so SQLite/DuckDB can still use a string-prefix index
+# if one exists on StringIds.value.
+_NCCL_LIKE = "(s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')"
+
 
 def _execute(conn, **kwargs):
     from ...overlap import overlap_analysis
@@ -44,10 +50,8 @@ def _execute(conn, **kwargs):
             same_stream = prof._duckdb_query(
                 f"""
                 SELECT k.streamId,
-                    SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
-                        THEN 1 ELSE 0 END) AS nccl_count,
-                    SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
-                        THEN 1 ELSE 0 END) AS compute_count
+                    SUM(CASE WHEN {_NCCL_LIKE} THEN 1 ELSE 0 END) AS nccl_count,
+                    SUM(CASE WHEN NOT {_NCCL_LIKE} THEN 1 ELSE 0 END) AS compute_count
                 FROM {kernel_tbl} k
                 JOIN StringIds s ON k.shortName = s.id
                 WHERE k.deviceId = ? {trim_clause}
@@ -58,8 +62,55 @@ def _execute(conn, **kwargs):
             )
             if same_stream:
                 result["same_stream_diagnosis"] = [str(r["streamId"]) for r in same_stream]
+                # Quantify the diagnosis: a near-clean multi-stream layout
+                # with a few stray cross-stream kernels reads identically
+                # to 100 % collision without these percentages. Trigger
+                # above is unchanged; the proportions are purely additive.
+                totals = prof._duckdb_query(
+                    f"""
+                    SELECT
+                        SUM(CASE WHEN {_NCCL_LIKE} THEN 1 ELSE 0 END) AS nccl_total,
+                        SUM(CASE WHEN NOT {_NCCL_LIKE} THEN 1 ELSE 0 END) AS compute_total
+                    FROM {kernel_tbl} k
+                    JOIN StringIds s ON k.shortName = s.id
+                    WHERE k.deviceId = ? {trim_clause}
+                    """,
+                    params,
+                )
+                if totals:
+                    nccl_total = totals[0]["nccl_total"] or 0
+                    compute_total = totals[0]["compute_total"] or 0
+                    nccl_same = sum((r["nccl_count"] or 0) for r in same_stream)
+                    compute_same = sum((r["compute_count"] or 0) for r in same_stream)
+                    if compute_total > 0:
+                        result["same_stream_compute_pct"] = round(
+                            100 * compute_same / compute_total, 1
+                        )
+                    if nccl_total > 0:
+                        result["same_stream_nccl_pct"] = round(
+                            100 * nccl_same / nccl_total, 1
+                        )
     except DB_ERRORS:
         _log.debug("Failed to enrich stream compute/nccl overlap", exc_info=True)
+
+    # Surface other GPUs that exist in the profile. Otherwise a multi-rank
+    # single-node profile is invisible to the agent (which only sees
+    # device=0 by default). Intentionally profile-wide — NOT window-scoped —
+    # because "which devices exist" is a topology property, not a per-window
+    # one. A trim window that excludes a rank's activity should not hide
+    # that rank from the device list.
+    try:
+        kernel_tbl = prof.schema.kernel_table
+        if kernel_tbl:
+            devs = prof._duckdb_query(
+                f"SELECT DISTINCT deviceId FROM {kernel_tbl} ORDER BY deviceId"
+            )
+            if devs:
+                result["present_devices"] = [
+                    int(r["deviceId"]) for r in devs if r["deviceId"] is not None
+                ]
+    except DB_ERRORS:
+        _log.debug("Failed to enumerate present devices", exc_info=True)
 
     try:
         from ...skills.registry import get_skill
@@ -93,6 +144,30 @@ def _format(rows):
     if r.get("sync_ms"):
         lines.append(f"  ⚡ CPU Sync:     {r['sync_ms']:.1f}ms (global host-side blocking)")
     lines.append(f"  Kernels:       {r['compute_kernels']} compute + {r['nccl_kernels']} NCCL")
+
+    # Same-stream serialization warning — surfaced in textual output so it's
+    # visible without parsing JSON. Proportions added when available.
+    streams = r.get("same_stream_diagnosis")
+    if streams:
+        compute_pct = r.get("same_stream_compute_pct")
+        nccl_pct = r.get("same_stream_nccl_pct")
+        suffix = ""
+        if compute_pct is not None and nccl_pct is not None:
+            suffix = f" — {compute_pct}% of compute + {nccl_pct}% of NCCL"
+        lines.append(
+            f"  ⚠️ Same-stream:  stream(s) [{', '.join(streams)}] carry both"
+            f"{suffix} → overlap blocked"
+        )
+
+    # Multi-device hint — textual users miss the device list otherwise.
+    devs = r.get("present_devices") or []
+    if len(devs) > 1:
+        analyzed = r.get("device_id", 0)
+        others = [str(d) for d in devs if d != analyzed]
+        lines.append(
+            f"  Devices:       {analyzed} (analyzed); profile also has "
+            f"[{', '.join(others)}] — re-run with -p device=N for each"
+        )
     return "\n".join(lines)
 
 
@@ -121,10 +196,17 @@ def _to_findings(rows: list[dict]) -> list:
         )
         streams = r.get("same_stream_diagnosis")
         if streams:
+            compute_pct = r.get("same_stream_compute_pct")
+            nccl_pct = r.get("same_stream_nccl_pct")
             note += (
                 f" Streams [{', '.join(streams)}] run both NCCL and "
                 f"compute — overlap is impossible on same stream."
             )
+            if compute_pct is not None and nccl_pct is not None:
+                note += (
+                    f" ({compute_pct}% of compute and {nccl_pct}% of NCCL "
+                    f"share these streams.)"
+                )
 
         findings.append(
             Finding(
@@ -167,12 +249,18 @@ SKILL = Skill(
     description=(
         "Quantifies how much GPU compute overlaps with NCCL communication. "
         "Shows compute-only, NCCL-only, overlap, and idle time. "
-        "overlap_pct > 60% means NCCL is well-hidden behind compute."
+        "overlap_pct > 60% means NCCL is well-hidden behind compute. "
+        "Also detects same-stream serialization (compute and NCCL sharing a "
+        "single stream, which blocks overlap) and surfaces multi-GPU presence "
+        "via present_devices for profiles with more than one rank."
     ),
     category="communication",
     execute_fn=_execute,
     format_fn=_format,
     to_findings_fn=_to_findings,
     params=[SkillParam("device", "GPU device ID", "int", False, 0)],
-    tags=["overlap", "nccl", "compute", "communication", "distributed"],
+    tags=[
+        "overlap", "nccl", "compute", "communication", "distributed",
+        "multi-gpu", "same-stream", "stream-serialization",
+    ],
 )
