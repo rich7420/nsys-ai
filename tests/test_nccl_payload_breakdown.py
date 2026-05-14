@@ -203,14 +203,22 @@ def test_skill_returns_error_when_no_payload_schemas():
 
 
 def test_skill_handles_empty_events_table():
-    """Schemas defined but no binaryData events → summary with zero counts."""
+    """Schemas defined but no binaryData events → explicit error message
+    explaining the likely capture-flag issue, not silent zeros. This is
+    the second-most-common "no data" case after `no schemas at all` and
+    was observed on real fastvideo / nano_vllm profiles where NCCL ran
+    but typed-payload NVTX emission wasn't enabled at capture time."""
     conn = _build_db_with_nccl_payloads()
     conn.execute("DELETE FROM NVTX_EVENTS")
     conn.commit()
     rows = SKILL.execute_fn(conn)
-    assert rows[0]["_summary"] is True
-    assert rows[0]["total_payload_events"] == 0
-    assert rows[0]["total_bytes_all"] == 0
+    assert "error" in rows[0]
+    # Error must call out the capture-flag root cause:
+    assert "typed-payload" in rows[0]["error"]
+    assert "capture" in rows[0]["error"].lower()
+    # Diagnostic fields to help the agent build a re-profile suggestion:
+    assert rows[0]["schemas_present"] == 2  # from the fixture
+    assert rows[0]["binary_data_rows"] == 0
 
 
 def test_format_produces_human_readable_output():

@@ -184,6 +184,33 @@ def _execute(conn, **kwargs) -> list[dict]:
     if not schemas:
         return [{"error": "No NVTX_PAYLOAD_SCHEMAS in this profile (NCCL typed payloads not captured)"}]
 
+    # Probe for the second-common "no data" case: schemas declared but
+    # NVTX_EVENTS.binaryData is empty. This happens when the profile was
+    # captured without NCCL's typed-payload NVTX emission enabled — NCCL
+    # ran, kernels executed, but no per-collective payload was recorded.
+    # Observed on real fastvideo / nano_vllm profiles. Returning an
+    # explanatory error here is far more useful than silently emitting
+    # a zero-everything summary.
+    try:
+        (has_any,) = adapter.execute(
+            "SELECT EXISTS(SELECT 1 FROM NVTX_EVENTS WHERE binaryData IS NOT NULL)"
+        ).fetchone()
+    except DB_ERRORS:
+        has_any = 0
+    if not has_any:
+        return [{
+            "error": (
+                f"NVTX_PAYLOAD_SCHEMAS declares {len(schemas)} schemas but "
+                "NVTX_EVENTS.binaryData is empty — NCCL kernels likely ran but "
+                "typed-payload NVTX emission was not enabled at capture time. "
+                "Re-profile with `nsys profile -t cuda,nvtx,...` and ensure NCCL "
+                "is built with NVTX support (NCCL ≥ 2.18 emits typed payloads "
+                "by default; older builds require NCCL_NVTX_DOMAIN_EVENTS=1)."
+            ),
+            "schemas_present": len(schemas),
+            "binary_data_rows": 0,
+        }]
+
     # Honor the standard trim convention documented in PRINCIPLES.md §9.
     # Either both bounds set or neither; partial trim falls through to
     # whole-profile (consistent with how iteration_detail / overlap_breakdown
