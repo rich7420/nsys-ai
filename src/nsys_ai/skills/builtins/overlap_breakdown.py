@@ -58,11 +58,10 @@ def _execute(conn, **kwargs):
             )
             if same_stream:
                 result["same_stream_diagnosis"] = [str(r["streamId"]) for r in same_stream]
-                # Surface the proportion so callers can distinguish "100 % of
-                # both kinds collide on one stream" (the worst case, as on the
-                # fastvideo profile) from "5 % cross-mix" (a near-clean
-                # multi-stream layout that just happens to have a few edge
-                # cases). Trigger above is unchanged; this is purely additive.
+                # Quantify the diagnosis: a near-clean multi-stream layout
+                # with a few stray cross-stream kernels reads identically
+                # to 100 % collision without these percentages. Trigger
+                # above is unchanged; the proportions are purely additive.
                 totals = prof._duckdb_query(
                     f"""
                     SELECT
@@ -92,10 +91,9 @@ def _execute(conn, **kwargs):
     except DB_ERRORS:
         _log.debug("Failed to enrich stream compute/nccl overlap", exc_info=True)
 
-    # Surface other GPUs that exist in the profile. The skill defaults to
-    # device=0 silently, so a multi-rank single-node profile (e.g. 4 GPUs)
-    # was previously invisible to the agent. With present_devices the agent
-    # knows to re-run with -p device=N for each rank if needed.
+    # Surface other GPUs that exist in the profile. Otherwise a multi-rank
+    # single-node profile is invisible to the agent (which only sees
+    # device=0 by default).
     try:
         kernel_tbl = prof.schema.kernel_table
         if kernel_tbl:
@@ -141,6 +139,30 @@ def _format(rows):
     if r.get("sync_ms"):
         lines.append(f"  ⚡ CPU Sync:     {r['sync_ms']:.1f}ms (global host-side blocking)")
     lines.append(f"  Kernels:       {r['compute_kernels']} compute + {r['nccl_kernels']} NCCL")
+
+    # Same-stream serialization warning — surfaced in textual output so it's
+    # visible without parsing JSON. Proportions added when available.
+    streams = r.get("same_stream_diagnosis")
+    if streams:
+        compute_pct = r.get("same_stream_compute_pct")
+        nccl_pct = r.get("same_stream_nccl_pct")
+        suffix = ""
+        if compute_pct is not None and nccl_pct is not None:
+            suffix = f" — {compute_pct}% of compute + {nccl_pct}% of NCCL"
+        lines.append(
+            f"  ⚠️ Same-stream:  stream(s) [{', '.join(streams)}] carry both"
+            f"{suffix} → overlap blocked"
+        )
+
+    # Multi-device hint — textual users miss the device list otherwise.
+    devs = r.get("present_devices") or []
+    if len(devs) > 1:
+        analyzed = r.get("device_id", 0)
+        others = [str(d) for d in devs if d != analyzed]
+        lines.append(
+            f"  Devices:       {analyzed} (analyzed); profile also has "
+            f"[{', '.join(others)}] — re-run with -p device=N for each"
+        )
     return "\n".join(lines)
 
 
@@ -169,10 +191,17 @@ def _to_findings(rows: list[dict]) -> list:
         )
         streams = r.get("same_stream_diagnosis")
         if streams:
+            compute_pct = r.get("same_stream_compute_pct")
+            nccl_pct = r.get("same_stream_nccl_pct")
             note += (
                 f" Streams [{', '.join(streams)}] run both NCCL and "
                 f"compute — overlap is impossible on same stream."
             )
+            if compute_pct is not None and nccl_pct is not None:
+                note += (
+                    f" ({compute_pct}% of compute and {nccl_pct}% of NCCL "
+                    f"share these streams.)"
+                )
 
         findings.append(
             Finding(
