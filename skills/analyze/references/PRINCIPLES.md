@@ -129,8 +129,10 @@ nsys-ai timeline-web <profile> --findings /tmp/findings.json
 ```
 
 `<device_id>` is `0` for single-GPU runs. For multi-GPU profiles, run
-`overlap_breakdown` first and pick `available_devices[0]` from its output
-(the manifest's `overlap` subobject does not expose a device id). The legacy
+`overlap_breakdown` first; each row has a `device_id` field — pick the
+first row's value (the manifest's `overlap` subobject does not expose a
+device id, and `available_devices` only appears in the empty-device-0
+diagnostic dict at `overlap.py:249`, not in normal output). The legacy
 `nsys-ai evidence build` still works and emits the same JSON shape but is
 deprecated — use `analyze --format json`.
 
@@ -170,10 +172,13 @@ Only on explicit user request ("save this", "generate report", "markdown report"
 nsys-ai report <profile> --gpu <device_id> --trim <start_s> <end_s> -o report.md
 ```
 
-Both `--gpu` and `--trim` are required (verified `src/nsys_ai/cli/parsers.py:289`). Plugin
-supplies from manifest: `gpu` = first device in `overlap.available_devices` or 0; `trim`
-= smart-trim iteration range (if Mode 1 Stage 3 was taken) else
-`0 profile_span_ms/1000`. Slow on large profiles — confirm before running.
+Both `--gpu` and `--trim` are required (verified `src/nsys_ai/cli/parsers.py:289`).
+Plugin defaults: `gpu` = `0` for single-GPU, else the first row's `device_id` from
+`overlap_breakdown` output (see §5.1 caveat about `available_devices`); `trim` =
+smart-trim iteration range (if Mode 1 Stage 3 was taken) else
+`0 → profile_span_ms/1000` (read full span from
+`data_quality.auto_trim.profile_full_span_ms` when auto-trim has applied).
+Slow on large profiles — confirm before running.
 
 ### §5.5 Mode 7 evidence exception
 
