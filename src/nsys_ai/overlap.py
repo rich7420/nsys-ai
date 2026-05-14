@@ -49,12 +49,17 @@ def overlap_analysis(prof: Profile, device: int, trim: tuple[int, int] | None = 
         total_ms:         Wall-clock span
     """
     if _has_duckdb(prof):
+        from .connection import DB_ERRORS
+
         try:
             sql_result = _overlap_analysis_sql(prof, device, trim)
             if sql_result is not None:
                 return sql_result
             return _no_kernels_diag(prof, device, trim)
-        except Exception as e:
+        except DB_ERRORS as e:
+            # Narrow to DB_ERRORS so genuine Python bugs in the SQL path
+            # surface instead of silently falling back. Engine-level
+            # failures (DuckDB / SQLite errors) still degrade gracefully.
             log.warning(
                 "overlap_analysis SQL path failed (%s); falling back to Python interval merge",
                 e,

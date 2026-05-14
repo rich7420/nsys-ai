@@ -121,6 +121,25 @@ class TestSqlPath:
             prof.close()
         assert sql_res is None
 
+    def test_compute_only_profile_zero_overlap_pct(self, duckdb_conn):
+        """Trim that excludes every NCCL kernel must yield overlap_pct=0
+        without a division-by-zero. Exercises the ``if nccl_ns else 0``
+        guard inside the SQL path."""
+        prof = Profile._from_conn(duckdb_conn)
+        try:
+            # [1ms, 2ms] only catches kernel_A (compute), no NCCL kernel
+            # has start >= 1ms and end <= 2ms.
+            sql_res = _overlap_analysis_sql(prof, 0, (1_000_000, 2_000_000))
+            py_res = _overlap_analysis_python(prof, 0, (1_000_000, 2_000_000))
+        finally:
+            prof.close()
+        assert sql_res is not None
+        assert sql_res["nccl_kernels"] == 0
+        assert sql_res["compute_kernels"] == 1
+        assert sql_res["overlap_ms"] == 0
+        assert sql_res["overlap_pct"] == 0
+        assert sql_res["overlap_pct"] == py_res["overlap_pct"]
+
 
 class TestPythonFallback:
     def test_sqlite_path_uses_python_implementation(self, minimal_nsys_conn):
