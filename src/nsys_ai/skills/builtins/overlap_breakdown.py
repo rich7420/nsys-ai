@@ -58,8 +58,56 @@ def _execute(conn, **kwargs):
             )
             if same_stream:
                 result["same_stream_diagnosis"] = [str(r["streamId"]) for r in same_stream]
+                # Surface the proportion so callers can distinguish "100 % of
+                # both kinds collide on one stream" (the worst case, as on the
+                # fastvideo profile) from "5 % cross-mix" (a near-clean
+                # multi-stream layout that just happens to have a few edge
+                # cases). Trigger above is unchanged; this is purely additive.
+                totals = prof._duckdb_query(
+                    f"""
+                    SELECT
+                        SUM(CASE WHEN s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%'
+                            THEN 1 ELSE 0 END) AS nccl_total,
+                        SUM(CASE WHEN NOT (s.value LIKE '%nccl%' OR s.value LIKE '%NCCL%')
+                            THEN 1 ELSE 0 END) AS compute_total
+                    FROM {kernel_tbl} k
+                    JOIN StringIds s ON k.shortName = s.id
+                    WHERE k.deviceId = ? {trim_clause}
+                    """,
+                    params,
+                )
+                if totals:
+                    nccl_total = totals[0]["nccl_total"] or 0
+                    compute_total = totals[0]["compute_total"] or 0
+                    nccl_same = sum((r["nccl_count"] or 0) for r in same_stream)
+                    compute_same = sum((r["compute_count"] or 0) for r in same_stream)
+                    if compute_total > 0:
+                        result["same_stream_compute_pct"] = round(
+                            100 * compute_same / compute_total, 1
+                        )
+                    if nccl_total > 0:
+                        result["same_stream_nccl_pct"] = round(
+                            100 * nccl_same / nccl_total, 1
+                        )
     except DB_ERRORS:
         _log.debug("Failed to enrich stream compute/nccl overlap", exc_info=True)
+
+    # Surface other GPUs that exist in the profile. The skill defaults to
+    # device=0 silently, so a multi-rank single-node profile (e.g. 4 GPUs)
+    # was previously invisible to the agent. With present_devices the agent
+    # knows to re-run with -p device=N for each rank if needed.
+    try:
+        kernel_tbl = prof.schema.kernel_table
+        if kernel_tbl:
+            devs = prof._duckdb_query(
+                f"SELECT DISTINCT deviceId FROM {kernel_tbl} ORDER BY deviceId"
+            )
+            if devs:
+                result["present_devices"] = [
+                    int(r["deviceId"]) for r in devs if r["deviceId"] is not None
+                ]
+    except DB_ERRORS:
+        _log.debug("Failed to enumerate present devices", exc_info=True)
 
     try:
         from ...skills.registry import get_skill

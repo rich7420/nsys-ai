@@ -83,6 +83,51 @@ def test_legacy_fallback():
     assert fp.framework == "DeepSpeed"
 
 
+def test_distributed_kernel_device_fallback():
+    """Multi-device kernel activity should mark distributed=True even when
+    NVTX_PAYLOAD_SCHEMAS has no NCCL entry (observed on fastvideo profiles)."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE NsightSchemaMeta (version INTEGER)")
+    c.execute("CREATE TABLE StringIds (value TEXT)")
+    c.execute("INSERT INTO StringIds VALUES ('forward')")
+    c.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+        "(correlationId INTEGER, deviceId INTEGER)"
+    )
+    for dev in (0, 1, 2, 3):
+        c.execute(
+            "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, ?)", (dev, dev)
+        )
+    conn.commit()
+
+    fp = get_fingerprint(conn)
+    assert fp.distributed is True, (
+        "Expected fallback to detect 4 distinct deviceIds as distributed"
+    )
+
+
+def test_distributed_single_device_stays_false():
+    """A profile with kernels on only one device must remain distributed=False."""
+    conn = sqlite3.connect(":memory:")
+    c = conn.cursor()
+    c.execute("CREATE TABLE NsightSchemaMeta (version INTEGER)")
+    c.execute("CREATE TABLE StringIds (value TEXT)")
+    c.execute("INSERT INTO StringIds VALUES ('forward')")
+    c.execute(
+        "CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL "
+        "(correlationId INTEGER, deviceId INTEGER)"
+    )
+    for i in range(5):
+        c.execute(
+            "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, 0)", (i,)
+        )
+    conn.commit()
+
+    fp = get_fingerprint(conn)
+    assert fp.distributed is False
+
+
 # ---------------------------------------------------------------------------
 # get_profile_id — content-derived stable identifier
 # ---------------------------------------------------------------------------
