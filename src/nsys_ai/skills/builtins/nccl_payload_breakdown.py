@@ -261,10 +261,21 @@ def _execute(conn, **kwargs) -> list[dict]:
             trim_start, trim_end,
         )
 
-    # Per-schema buckets.
+    # Per-schema buckets + a cross-schema communicator set so the summary
+    # can answer "are these schemas all on the same comm or different?"
+    # (Without this, six schemas each reporting "distinct_communicators: 1"
+    # is ambiguous between "same comm everywhere" and "six different
+    # single-rank comms" — observed when reviewing the skill on
+    # tgate05_perf.sqlite.)
     per_schema: dict[int, dict] = defaultdict(
-        lambda: {"count": 0, "msg_sizes": [], "communicators": set()}
+        lambda: {
+            "count": 0,
+            "msg_sizes": [],
+            "communicators": set(),
+            "peer_ranks": defaultdict(int),
+        }
     )
+    global_communicators: set = set()
     decoded = 0
     skipped = 0
 
@@ -285,6 +296,9 @@ def _execute(conn, **kwargs) -> list[dict]:
             bucket["msg_sizes"].append(f["Message size [bytes]"])
         if "NCCL communicator ID" in f:
             bucket["communicators"].add(f["NCCL communicator ID"])
+            global_communicators.add(f["NCCL communicator ID"])
+        if "Peer rank" in f:
+            bucket["peer_ranks"][f["Peer rank"]] += 1
 
     rows: list[dict] = []
     total_bytes = 0
@@ -302,6 +316,27 @@ def _execute(conn, **kwargs) -> list[dict]:
             "count": bucket["count"],
             "distinct_communicators": len(bucket["communicators"]),
         }
+        # Surface peer-rank distribution for schemas that record it (p2p).
+        # A uniformity score = 1.0 means traffic is split evenly across all
+        # observed peers (e.g. symmetric all-to-all), < 1.0 means skewed
+        # (e.g. ring-only or hub-spoke). Computed only when ≥ 1 peer
+        # observed so init/collective/group_marker rows stay compact.
+        if bucket["peer_ranks"]:
+            peer_counts = dict(bucket["peer_ranks"])
+            total_peer_events = sum(peer_counts.values())
+            n_peers = len(peer_counts)
+            # Uniformity score (Jain's fairness index simplified for our use):
+            #   1.0 when all peers see the same traffic share
+            #   1/n when one peer hogs everything
+            if n_peers > 0 and total_peer_events > 0:
+                mean = total_peer_events / n_peers
+                ssq = sum((c - mean) ** 2 for c in peer_counts.values())
+                # std/mean coefficient of variation → mapped to (0, 1] uniformity
+                cv = (ssq / n_peers) ** 0.5 / mean if mean > 0 else 0.0
+                uniformity = max(0.0, 1.0 - cv)
+                row["distinct_peer_ranks"] = n_peers
+                row["peer_rank_uniformity"] = round(uniformity, 3)
+                row["peer_rank_distribution"] = peer_counts
         if sizes:
             message_carrying_events += len(sizes)
             row["msg_size_bytes_total"] = msg_total
@@ -326,6 +361,12 @@ def _execute(conn, **kwargs) -> list[dict]:
         "total_bytes_all": total_bytes,
         "total_gib_all": round(total_bytes / (1024**3), 2),
         "distinct_schemas": len(per_schema),
+        # Cross-schema communicator rollup. "1" here means every event in
+        # every schema uses the same NCCL communicator (typical for a
+        # single SP/TP group). Higher values indicate multi-group setups
+        # (e.g. DP×TP×SP). Per-schema `distinct_communicators` is a subset
+        # view of this set.
+        "total_distinct_communicators": len(global_communicators),
     }
     return [summary, *rows]
 

@@ -574,3 +574,81 @@ def test_skill_counts_distinct_communicators():
     rows = SKILL.execute_fn(conn)
     data = {r["schema_id"]: r for r in rows[1:]}
     assert data[100]["distinct_communicators"] == 2
+
+
+def test_summary_total_distinct_communicators_is_cross_schema():
+    """`distinct_communicators` per row is a per-schema view; we also need a
+    cross-schema rollup so users can answer 'is this a single-comm or
+    multi-comm setup?'. On a fresh fixture both schemas share the same
+    comm so the cross-schema total is 1."""
+    conn = _build_db_with_nccl_payloads()
+    rows = SKILL.execute_fn(conn)
+    assert rows[0]["total_distinct_communicators"] == 1
+
+    # Now add a second-comm event on schema 200 (p2p). Per-schema counts
+    # update; cross-schema rollup should bump to 2.
+    c = conn.cursor()
+    payload = struct.pack("<QQI", 0xDEAD_FACE_F00D_C0DE, 4096, 1) + b"\x00\x00\x00\x00"
+    c.execute("INSERT INTO NVTX_EVENTS VALUES (?, 59, ?)", (0, _pack_event(200, payload)))
+    conn.commit()
+
+    rows2 = SKILL.execute_fn(conn)
+    assert rows2[0]["total_distinct_communicators"] == 2, (
+        f"expected cross-schema 2 comm IDs; got {rows2[0]['total_distinct_communicators']}"
+    )
+
+
+def test_p2p_peer_rank_distribution_uniform():
+    """When all peer ranks see equal traffic share (the all-to-all common
+    case), `peer_rank_uniformity` should be 1.0."""
+    conn = _build_db_with_nccl_payloads()
+    # Add 4 more p2p events with distinct peer ranks 0,1,2,3 — uniform 50/50.
+    # Existing fixture already has peers [1, 2] one each. Add peers [0, 3]
+    # so all four ranks see exactly one event each (perfectly uniform).
+    c = conn.cursor()
+    comm = 0xCAFE_BABE_DEAD_BEEF
+    for peer in (0, 3):
+        payload = struct.pack("<QQI", comm, 8192, peer) + b"\x00\x00\x00\x00"
+        c.execute("INSERT INTO NVTX_EVENTS VALUES (?, 59, ?)", (0, _pack_event(200, payload)))
+    conn.commit()
+
+    rows = SKILL.execute_fn(conn)
+    p2p_row = next(r for r in rows[1:] if r["schema_id"] == 200)
+    assert p2p_row["distinct_peer_ranks"] == 4
+    assert p2p_row["peer_rank_uniformity"] == 1.0, (
+        f"4 peers × 1 event each → uniform; got {p2p_row['peer_rank_uniformity']}"
+    )
+    assert p2p_row["peer_rank_distribution"] == {0: 1, 1: 1, 2: 1, 3: 1}
+
+
+def test_p2p_peer_rank_distribution_skewed():
+    """A skewed distribution (one peer dominates) gets uniformity < 1.0.
+    Catches future regressions where the score computation might lock to
+    1.0 for any non-empty distribution."""
+    conn = _build_db_with_nccl_payloads()
+    c = conn.cursor()
+    comm = 0xCAFE_BABE_DEAD_BEEF
+    # Pile 8 more events all on peer rank 1 (existing fixture: 1 each on
+    # peer 1 and 2). After: peer 1 has 9, peer 2 has 1 — highly skewed.
+    for _ in range(8):
+        payload = struct.pack("<QQI", comm, 8192, 1) + b"\x00\x00\x00\x00"
+        c.execute("INSERT INTO NVTX_EVENTS VALUES (?, 59, ?)", (0, _pack_event(200, payload)))
+    conn.commit()
+
+    rows = SKILL.execute_fn(conn)
+    p2p_row = next(r for r in rows[1:] if r["schema_id"] == 200)
+    assert p2p_row["distinct_peer_ranks"] == 2
+    assert p2p_row["peer_rank_uniformity"] < 1.0, (
+        f"skewed distribution should not score 1.0; got {p2p_row['peer_rank_uniformity']}"
+    )
+
+
+def test_collective_schemas_have_no_peer_rank_fields():
+    """Non-p2p schemas (no Peer rank in field_set) must not emit
+    peer-rank fields. Locks in compactness for init/collective rows."""
+    conn = _build_db_with_nccl_payloads()
+    rows = SKILL.execute_fn(conn)
+    collective_row = next(r for r in rows[1:] if r["schema_id"] == 100)
+    assert "distinct_peer_ranks" not in collective_row
+    assert "peer_rank_uniformity" not in collective_row
+    assert "peer_rank_distribution" not in collective_row
