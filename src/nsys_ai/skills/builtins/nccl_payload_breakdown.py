@@ -184,19 +184,48 @@ def _execute(conn, **kwargs) -> list[dict]:
     if not schemas:
         return [{"error": "No NVTX_PAYLOAD_SCHEMAS in this profile (NCCL typed payloads not captured)"}]
 
-    # Probe for the second-common "no data" case: schemas declared but
-    # NVTX_EVENTS.binaryData is empty. This happens when the profile was
-    # captured without NCCL's typed-payload NVTX emission enabled — NCCL
-    # ran, kernels executed, but no per-collective payload was recorded.
-    # Observed on real fastvideo / nano_vllm profiles. Returning an
-    # explanatory error here is far more useful than silently emitting
-    # a zero-everything summary.
+    # Probe for the two "no data" cases:
+    #   (a) capture-time misconfiguration: schemas declared but binaryData
+    #       column has zero non-null rows (NCCL ran but typed-payload NVTX
+    #       wasn't emitted). Observed on real fastvideo/nano_vllm captures.
+    #   (b) backend limitation: DuckDB's sqlite_scanner reports BLOB
+    #       columns with declared TEXT type as a type mismatch, raising on
+    #       any read. Hits when the CLI is run with --no-cache against a
+    #       profile that DOES have binaryData. Without this branch we'd
+    #       misreport (b) as (a) and tell the user to re-profile when the
+    #       fix is "use the parquet cache instead".
     try:
         (has_any,) = adapter.execute(
             "SELECT EXISTS(SELECT 1 FROM NVTX_EVENTS WHERE binaryData IS NOT NULL)"
         ).fetchone()
-    except DB_ERRORS:
+        probe_failed = False
+    except DB_ERRORS as exc:
         has_any = 0
+        # Distinguish (b) from (a): if NVTX_EVENTS rows exist but the
+        # binaryData filter errored, the column is unreadable through this
+        # backend — not actually empty.
+        probe_failed = False
+        try:
+            (nvtx_rows,) = adapter.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()
+            if nvtx_rows > 0:
+                probe_failed = True
+                probe_error_msg = str(exc)
+        except DB_ERRORS:
+            pass
+
+    if probe_failed:
+        return [{
+            "error": (
+                "Cannot read NVTX_EVENTS.binaryData through the current "
+                "backend (DuckDB sqlite-scanner raises on BLOB columns "
+                f"declared as TEXT in sqlite: {probe_error_msg!r}). "
+                "Re-run without `--no-cache` — the parquet cache path "
+                "stores binaryData as hex-encoded strings and works "
+                "correctly."
+            ),
+            "schemas_present": len(schemas),
+            "backend_limitation": True,
+        }]
     if not has_any:
         return [{
             "error": (

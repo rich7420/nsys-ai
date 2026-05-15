@@ -202,6 +202,56 @@ def test_skill_returns_error_when_no_payload_schemas():
     assert "NVTX_PAYLOAD" in rows[0]["error"]
 
 
+def test_skill_distinguishes_blob_read_failure_from_empty_data():
+    """If the backend's BLOB scanner errors out (observed: DuckDB
+    sqlite-scanner on --no-cache mode raises a 'Mismatch Type Error' for
+    BLOB columns declared as TEXT in sqlite), the skill must NOT silently
+    report 'binaryData empty' — that would tell users to re-profile when
+    the real fix is to switch off --no-cache.
+
+    Mocks the adapter so the binaryData probe raises, but the table-row
+    count succeeds (i.e. table is reachable, just unreadable through this
+    backend)."""
+    from nsys_ai.connection import DB_ERRORS
+
+    # Pick a real DB_ERRORS class to raise. We use the first one in the
+    # tuple (typically sqlite3.Error) which IS in DB_ERRORS, so the
+    # skill's try/except matches.
+    db_error_cls = DB_ERRORS[0]
+
+    class _FlakyAdapter:
+        """Reports schemas + total rows fine, but errors on binaryData reads."""
+
+        def __init__(self, base_conn):
+            self._base = base_conn
+
+        def execute(self, sql, params=()):
+            if "binaryData IS NOT NULL" in sql:
+                raise db_error_cls(
+                    "Mismatch Type Error: column declared text, found blob"
+                )
+            return self._base.execute(sql, params)
+
+    conn = _build_db_with_nccl_payloads()
+    # Patch wrap_connection to return our flaky adapter.
+    from nsys_ai.skills.builtins import nccl_payload_breakdown as mod
+    orig = mod.wrap_connection
+    mod.wrap_connection = lambda c: _FlakyAdapter(c)
+    try:
+        rows = SKILL.execute_fn(conn)
+    finally:
+        mod.wrap_connection = orig
+
+    assert "error" in rows[0]
+    assert rows[0].get("backend_limitation") is True, (
+        f"Expected backend_limitation:True; got {rows[0]}"
+    )
+    # Error message must NOT recommend re-profiling (the real fix is
+    # switching backend, not re-capturing the profile).
+    assert "Re-profile" not in rows[0]["error"]
+    assert "--no-cache" in rows[0]["error"]
+
+
 def test_skill_handles_empty_events_table():
     """Schemas defined but no binaryData events → explicit error message
     explaining the likely capture-flag issue, not silent zeros. This is
