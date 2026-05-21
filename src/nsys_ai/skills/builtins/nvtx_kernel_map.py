@@ -1,4 +1,29 @@
-"""Map NVTX annotation ranges to their GPU kernel children."""
+"""Map NVTX annotation ranges to their GPU kernel children.
+
+Output schema (per row):
+
+  ``nvtx_text``  — the **leaf** NVTX label: the innermost NVTX scope
+                   that was still open at the kernel's launch time.
+  ``nvtx_path``  — the full ancestor stack (root → leaf, ``" > "``
+                   separated), present in DuckDB-cache outputs.
+  ``kernel_name`` / ``start_ms`` / ``end_ms`` — self-explanatory.
+
+WARNING — NVTX path containment is **temporal**, not lexical. A
+kernel whose ``nvtx_path`` contains ``"Torch-Compiled Region"`` does
+NOT mean Inductor compiled that kernel — it only means a compile-
+region NVTX happened to still be open *somewhere up the stack* when
+the kernel launched. Eager calls inside the same thread can land
+under the same path until the outer scope closes. A real fastvideo
+audit shipped a wrong-path fix recommendation by treating path
+containment as lexical: ``nvtx_path LIKE '%Torch-Compiled%'`` matched
+96% of NCCL kernels, but only 5.4% were actually inductor-captured
+(``## Call CompiledFxGraph`` as the **leaf**).
+
+Rule of thumb: when the question is "what code path executed this
+op", classify by the **leaf** (``nvtx_text``), not by substring match
+on ``nvtx_path``. The ``nccl_compile_context_breakdown`` skill is the
+canonical example.
+"""
 
 from ..base import Skill, SkillParam
 
