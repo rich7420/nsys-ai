@@ -39,7 +39,10 @@ log = logging.getLogger(__name__)
 INSTALL_DIR = Path.home() / ".nsys-ai" / "cutracer"
 NVBIT_REPO = "https://github.com/NVlabs/NVBit/releases/download"
 NVBIT_VERSION = "1.7.1"
-CUTRACER_GITHUB = "https://github.com/facebookresearch/CUTracer"
+# The CUTracer repo migrated from the facebookresearch org to facebookexperimental.
+CUTRACER_GITHUB = "https://github.com/facebookexperimental/CUTracer"
+# Pinned release tag for reproducible builds (clone --branch). Bump on upstream releases.
+CUTRACER_TAG = "v0.2.1"
 
 # CUDA major.minor → NVBit release asset name pattern
 # NVBit ships separate builds for each CUDA toolkit version.
@@ -333,7 +336,7 @@ def _clone_and_build(
     *,
     progress: bool = True,
 ) -> Path:
-    """Clone facebookresearch/CUTracer from GitHub and build cutracer.so.
+    """Clone facebookexperimental/CUTracer from GitHub and build cutracer.so.
 
     This is the primary install path — the repo's own ``install_third_party.sh``
     handles NVBit and nlohmann/json download, so no separate NVBit step needed.
@@ -350,10 +353,10 @@ def _clone_and_build(
     else:
         if progress:
             print("  Cloning CUTracer from GitHub …")
-            print(f"    {CUTRACER_GITHUB}")
+            print(f"    {CUTRACER_GITHUB} @ {CUTRACER_TAG}")
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(  # nosec B603 B607
-            ["git", "clone", "--depth=1", CUTRACER_GITHUB, str(clone_dir)],
+            ["git", "clone", "--depth=1", "--branch", CUTRACER_TAG, CUTRACER_GITHUB, str(clone_dir)],
             capture_output=not progress,
             text=True,
         )
@@ -514,7 +517,7 @@ def install(
 
     # 3. Find or clone CUTracer source and build
     #
-    # Primary path:   GitHub clone (facebookresearch/CUTracer) — handles its
+    # Primary path:   GitHub clone (facebookexperimental/CUTracer) — handles its
     #                 own NVBit download via install_third_party.sh.
     # Fallback path:  pre-existing local source + separate NVBit download.
     cutracer_src = find_cutracer_source()

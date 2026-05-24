@@ -286,7 +286,8 @@ class TestFormatModalApp:
         plan, config = _make_plan_and_config(tmp_path)
         script = format_modal_app(plan, config)
         assert "git clone" in script
-        assert "facebookresearch/CUTracer" in script
+        assert "facebookexperimental/CUTracer" in script
+        assert "--branch v0.2.1" in script
         assert "install_third_party.sh" in script
         assert "nsys-ai cutracer install" not in script
 
