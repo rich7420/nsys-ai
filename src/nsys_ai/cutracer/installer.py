@@ -342,8 +342,9 @@ def _ensure_pinned_checkout(clone_dir: Path, so_dest: Path, *, progress: bool) -
 
     No-op (beyond a probe) when the clone is already at ``CUTRACER_TAG``.
     Raises ``RuntimeError`` if the worktree has uncommitted local changes
-    (rather than discarding them), or if the ``git remote set-url``, fetch, or
-    checkout step fails.
+    (rather than discarding them), if cleanliness cannot be verified (``git
+    status`` itself fails), or if the ``git remote set-url``, fetch, or checkout
+    step fails.
     """
     current = subprocess.run(  # nosec B603 B607
         ["git", "describe", "--tags", "--exact-match"],
@@ -351,6 +352,9 @@ def _ensure_pinned_checkout(clone_dir: Path, so_dest: Path, *, progress: bool) -
         capture_output=True,
         text=True,
     )
+    # A non-zero `git describe` here is the normal "HEAD is not exactly at a
+    # tag" case (an old clone) and is the trigger for reconciliation — not an
+    # error. A genuinely broken repo is caught by the `git status` check below.
     if current.returncode == 0 and current.stdout.strip() == CUTRACER_TAG:
         if progress:
             print(f"  Using existing clone at: {clone_dir} (@ {CUTRACER_TAG})")
@@ -358,14 +362,22 @@ def _ensure_pinned_checkout(clone_dir: Path, so_dest: Path, *, progress: bool) -
 
     # Refuse to clobber a dirty worktree — a user may have patched the clone
     # for debugging. Surface it and let them decide, rather than silently
-    # discarding their work in the checkout below.
+    # discarding their work in the checkout below. A failed `git status` means
+    # we cannot verify cleanliness (corrupt repo, permissions), so bail clearly
+    # rather than proceed to a checkout that might destroy data.
     status = subprocess.run(  # nosec B603 B607
         ["git", "status", "--porcelain"],
         cwd=clone_dir,
         capture_output=True,
         text=True,
     )
-    if status.returncode == 0 and status.stdout.strip():
+    if status.returncode != 0:
+        raise RuntimeError(
+            f"git status in {clone_dir} failed (exit {status.returncode}); "
+            f"cannot verify a clean worktree before checkout:\n"
+            f"{status.stderr or ''}"
+        )
+    if status.stdout.strip():
         raise RuntimeError(
             f"CUTracer clone at {clone_dir} has uncommitted local changes; "
             f"refusing to check out {CUTRACER_TAG} over them. Commit or stash "

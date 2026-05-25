@@ -306,6 +306,33 @@ class TestEnsurePinnedCheckout:
         assert ["git", "checkout"] not in cmds
         assert so_dest.exists()
 
+    def test_raises_when_git_status_fails(self, tmp_path):
+        """A failed `git status` means cleanliness is unverifiable — bail
+        clearly rather than proceed to a possibly destructive checkout."""
+        from nsys_ai.cutracer.installer import _ensure_pinned_checkout
+
+        clone = tmp_path / "CUTracer"
+        (clone / "lib").mkdir(parents=True)
+        so_dest = clone / "lib" / "cutracer.so"
+        so_dest.write_bytes(b"\x7fELF")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["git", "describe"]:
+                return MagicMock(returncode=0, stdout="deadbeef\n", stderr="")
+            if cmd[:2] == ["git", "status"]:
+                return MagicMock(returncode=128, stdout="", stderr="fatal: corrupt")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run) as mock_run:
+            with pytest.raises(RuntimeError, match="git status"):
+                _ensure_pinned_checkout(clone, so_dest, progress=False)
+
+        # No fetch/checkout attempted, stale .so left intact.
+        cmds = [c.args[0][:2] for c in mock_run.call_args_list]
+        assert ["git", "fetch"] not in cmds
+        assert ["git", "checkout"] not in cmds
+        assert so_dest.exists()
+
     def test_error_message_normalizes_none_stderr(self, tmp_path):
         """With progress=True, capture_output is False and .stderr is None —
         the error message must not leak the literal 'None'."""
