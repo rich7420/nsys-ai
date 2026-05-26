@@ -62,8 +62,10 @@ class RunConfig:
     shorter ``launch_cmd`` instead. Kept only for back-compat."""
 
     trace_size_limit_mb: int | None = None
-    """If set, sets ``CUTRACER_TRACE_SIZE_LIMIT_MB`` so CUTracer stops writing trace
-    once the on-disk size reaches this many MB (the running kernel is unaffected)."""
+    """If set, passes ``--trace-size-limit-mb`` to ``cutracer trace`` so CUTracer
+    stops writing trace once the on-disk size reaches this many MB (the running
+    kernel is unaffected). Applied as a CLI flag, not an env var: the wrapper
+    overrides ``CUTRACER_TRACE_SIZE_LIMIT_MB`` from this flag."""
 
 
 # ---------------------------------------------------------------------------
@@ -375,44 +377,43 @@ def run_with_cutracer(
     existing_hist = sorted(out_dir.glob("*_hist.csv"))
     if existing_hist:
         print(f"==> Found {{len(existing_hist)}} precomputed *_hist.csv file(s); skipping SASS post-process")
-        vol.commit()
-        return
+    else:
+        # Capture base_name → hash mapping from ndjson filenames before SASS resolution,
+        # so we can reconstruct the kernel_<name>_<hash>_hist.csv naming expected by the parser.
+        hash_map: dict = {{}}
+        for ndf in sorted(out_dir.glob("*.ndjson")):
+            base = re.sub(r"_iter\\d+", "", ndf.stem)
+            parts = base.split("_", 2)
+            if len(parts) >= 3:
+                arch = "_".join(base.split("_")[2:])
+                hash_map[arch] = parts[1]
 
-    # Capture base_name → hash mapping from ndjson filenames before SASS resolution,
-    # so we can reconstruct the kernel_<name>_<hash>_hist.csv naming expected by the parser.
-    hash_map: dict = {{}}
-    for ndf in sorted(out_dir.glob("*.ndjson")):
-        base = re.sub(r"_iter\\d+", "", ndf.stem)
-        parts = base.split("_", 2)
-        if len(parts) >= 3:
-            arch = "_".join(base.split("_")[2:])
-            hash_map[arch] = parts[1]
+        hists = sass_resolve_dir(out_dir)
+        if not hists:
+            print("WARNING: sass_resolve_dir returned no histograms — check cutracer/nvdisasm output")
 
-    hists = sass_resolve_dir(out_dir)
-    if not hists:
-        print("WARNING: sass_resolve_dir returned no histograms — check cutracer/nvdisasm output")
-
-    for arch_suffix, hist in hists.items():
-        hash_part = hash_map.get(arch_suffix, "0")
-        csv_path = out_dir / f"kernel_{{arch_suffix}}_{{hash_part}}_hist.csv"
-        with open(csv_path, "w", newline="") as cf:
-            writer = csv.writer(cf)
-            writer.writerow(["warp_id", "region_id", "instruction", "count", "cycles"])
-            for mn, cnt in sorted(hist.instruction_counts.items(), key=lambda x: -x[1]):
-                writer.writerow([0, 0, mn, cnt, hist.instruction_cycles.get(mn, 0)])
-        total = sum(hist.instruction_counts.values())
-        print(f"==> Wrote {{csv_path.name}} ({{total:,}} instructions, {{len(hist.instruction_counts)}} opcodes)")
+        for arch_suffix, hist in hists.items():
+            hash_part = hash_map.get(arch_suffix, "0")
+            csv_path = out_dir / f"kernel_{{arch_suffix}}_{{hash_part}}_hist.csv"
+            with open(csv_path, "w", newline="") as cf:
+                writer = csv.writer(cf)
+                writer.writerow(["warp_id", "region_id", "instruction", "count", "cycles"])
+                for mn, cnt in sorted(hist.instruction_counts.items(), key=lambda x: -x[1]):
+                    writer.writerow([0, 0, mn, cnt, hist.instruction_cycles.get(mn, 0)])
+            total = sum(hist.instruction_counts.values())
+            print(f"==> Wrote {{csv_path.name}} ({{total:,}} instructions, {{len(hist.instruction_counts)}} opcodes)")
 
     # -----------------------------------------------------------------------
-    # SASS resolution coverage — a cubin with no histogram failed nvdisasm
-    # (commonly a CUDA toolkit mismatch: the image's nvdisasm is older than the
-    # framework's CUDA build). Surface this loudly so a dropped HOT kernel is not
-    # mistaken for a clean run — the trace exits 0 even when resolution fails.
+    # SASS resolution coverage (runs for both the precomputed-hist and the
+    # SASS-fallback paths) — a captured cubin with no histogram failed nvdisasm,
+    # commonly a CUDA toolkit mismatch where the image's nvdisasm is older than
+    # the framework's CUDA build. Surface this loudly so a dropped HOT kernel is
+    # not mistaken for a clean run — the trace exits 0 even when resolution fails.
     # -----------------------------------------------------------------------
     cubins = sorted(out_dir.glob("*.cubin"))
     written = {{p.name for p in out_dir.glob("*_hist.csv")}}
-    print(f"==> SASS resolution: {{len(hists)}} kernel(s) resolved, {{len(cubins)}} cubin(s) captured")
-    if cubins and len(hists) < len(cubins):
+    print(f"==> SASS resolution: {{len(written)}} histogram(s), {{len(cubins)}} cubin(s) captured")
+    if cubins and len(written) < len(cubins):
         failed = []
         for cb in cubins:
             frag = cb.stem.split("_", 2)[-1] if cb.stem.count("_") >= 2 else cb.stem
