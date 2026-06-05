@@ -167,7 +167,7 @@ def search_nvtx_regions(
 def get_iteration_boundaries(
     ctx: DiffContext,
     marker: str | None = None,
-    target_gpu: int | None = 0,
+    target_gpu: int | None = None,
 ) -> dict:
     """
     Per-iteration time windows for both profiles plus is_aligned flag.
@@ -273,7 +273,7 @@ def explore_nvtx_hierarchy(
     ctx: DiffContext,
     parent_path: str = "",
     depth: int = 1,
-    target_gpu: int | None = 0,
+    target_gpu: int | None = None,
     profile_side: str = "after",
 ) -> dict:
     """
@@ -344,7 +344,7 @@ def get_iteration_diff(
     ctx: DiffContext,
     iteration_index: int,
     marker: str | None = None,
-    target_gpu: int | None = 0,
+    target_gpu: int | None = None,
 ) -> dict:
     """
     Macro diff for one iteration (time-window trim from detect_iterations).
@@ -389,15 +389,21 @@ def get_iteration_diff(
     wall_a = (trim_after[1] - trim_after[0]) / 1e6
     sum_k_b = sum(k.total_ns for k in summary.before.kernels) / 1e6
     sum_k_a = sum(k.total_ns for k in summary.after.kernels) / 1e6
-    # Unique stream count (Payload Contract)
-    gpu = target_gpu if target_gpu is not None else (ctx.before.meta.devices or [0])[0]
-    kerns_b = ctx.before.kernels(gpu, trim_before)
-    kerns_a = ctx.after.kernels(gpu, trim_after)
-    unique_streams_b = len(set(k.get("streamId") for k in kerns_b if k.get("streamId") is not None))
-    unique_streams_a = len(set(k.get("streamId") for k in kerns_a if k.get("streamId") is not None))
+    # Unique stream count (Payload Contract); target_gpu=None aggregates all devices
+    # so these detail fields match the all-GPU scope of `summary`.
+    kerns_b = ctx.before.kernels(target_gpu, trim_before)
+    kerns_a = ctx.after.kernels(target_gpu, trim_after)
+    # streamId is device-scoped, so count distinct (deviceId, streamId) pairs;
+    # otherwise an all-GPU window collapses each device's matching stream ids.
+    unique_streams_b = len(
+        {(k.get("deviceId"), k.get("streamId")) for k in kerns_b if k.get("streamId") is not None}
+    )
+    unique_streams_a = len(
+        {(k.get("deviceId"), k.get("streamId")) for k in kerns_a if k.get("streamId") is not None}
+    )
     # Memcpy H2D/D2H in window
-    mc_b = ctx.before.memcpy_in_window(gpu, trim_before)
-    mc_a = ctx.after.memcpy_in_window(gpu, trim_after)
+    mc_b = ctx.before.memcpy_in_window(target_gpu, trim_before)
+    mc_a = ctx.after.memcpy_in_window(target_gpu, trim_after)
     memcpy_ms = {
         "h2d": {
             "before": round(mc_b["h2d_ns"] / 1e6, 2),
@@ -524,7 +530,7 @@ def get_region_diff(
     ctx: DiffContext,
     nvtx_exact_match: str | list[str],
     iteration_index: int | None = None,
-    target_gpu: int | None = 0,
+    target_gpu: int | None = None,
 ) -> dict:
     """
     Micro diff for a code region (time window + NVTX filter).
@@ -576,10 +582,10 @@ def get_region_diff(
             "nvtx_exact_match": nvtx_exact_match,
         }
     nd = matching[0]
-    gpu = target_gpu if target_gpu is not None else (ctx.before.meta.devices or [0])[0]
-    # Payload Contract: same defensive fields as get_iteration_diff
-    mc_b = ctx.before.memcpy_in_window(gpu, trim_before)
-    mc_a = ctx.after.memcpy_in_window(gpu, trim_after)
+    # Payload Contract: same defensive fields as get_iteration_diff; target_gpu=None
+    # aggregates all devices so these match the all-GPU scope of `summary`.
+    mc_b = ctx.before.memcpy_in_window(target_gpu, trim_before)
+    mc_a = ctx.after.memcpy_in_window(target_gpu, trim_after)
     memcpy_ms = {
         "h2d": {
             "before": round(mc_b["h2d_ns"] / 1e6, 2),
@@ -592,10 +598,16 @@ def get_region_diff(
             "delta": round((mc_a["d2h_ns"] - mc_b["d2h_ns"]) / 1e6, 2),
         },
     }
-    kerns_b = ctx.before.kernels(gpu, trim_before)
-    kerns_a = ctx.after.kernels(gpu, trim_after)
-    unique_streams_b = len(set(k.get("streamId") for k in kerns_b if k.get("streamId") is not None))
-    unique_streams_a = len(set(k.get("streamId") for k in kerns_a if k.get("streamId") is not None))
+    kerns_b = ctx.before.kernels(target_gpu, trim_before)
+    kerns_a = ctx.after.kernels(target_gpu, trim_after)
+    # streamId is device-scoped, so count distinct (deviceId, streamId) pairs;
+    # otherwise an all-GPU window collapses each device's matching stream ids.
+    unique_streams_b = len(
+        {(k.get("deviceId"), k.get("streamId")) for k in kerns_b if k.get("streamId") is not None}
+    )
+    unique_streams_a = len(
+        {(k.get("deviceId"), k.get("streamId")) for k in kerns_a if k.get("streamId") is not None}
+    )
     idle_b = summary.before.overlap.get("idle_ms") or 0
     idle_a = summary.after.overlap.get("idle_ms") or 0
     mem_b = (mc_b["h2d_ns"] + mc_b["d2h_ns"] + mc_b["d2d_ns"]) / 1e6
@@ -659,7 +671,7 @@ def summarize_nvtx_subtree(
     ctx: DiffContext,
     parent_path: str,
     iteration_index: int | None = None,
-    target_gpu: int | None = 0,
+    target_gpu: int | None = None,
     top_n: int = 3,
 ) -> dict:
     """
@@ -1020,7 +1032,7 @@ def get_launch_config_diff(
     ctx: DiffContext,
     kernel_name: str,
     iteration_index: int | None = None,
-    target_gpu: int | None = 0,
+    target_gpu: int | None = None,
 ) -> dict:
     """
     Grid/block/registers before vs after; explains 'why'. Returns error when columns missing (BETA).
@@ -1266,7 +1278,10 @@ TOOLS_DIFF_OPENAI = [
                         "type": "string",
                         "description": "NVTX marker for iteration (e.g. %sample_0%)",
                     },
-                    "target_gpu": {"type": "integer", "description": "GPU ID or omit for default"},
+                    "target_gpu": {
+                        "type": "integer",
+                        "description": "GPU ID for iteration detection; omit to use the first device",
+                    },
                 },
                 "required": [],
             },
@@ -1286,7 +1301,10 @@ TOOLS_DIFF_OPENAI = [
                         "default": "",
                     },
                     "depth": {"type": "integer", "description": "Depth to expand", "default": 1},
-                    "target_gpu": {"type": "integer", "description": "GPU ID"},
+                    "target_gpu": {
+                        "type": "integer",
+                        "description": "GPU ID for the NVTX tree; omit to use the first device",
+                    },
                     "profile_side": {
                         "type": "string",
                         "enum": ["before", "after"],
@@ -1306,7 +1324,10 @@ TOOLS_DIFF_OPENAI = [
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "default": 20},
-                    "target_gpu": {"type": "integer", "description": "GPU ID or omit for all GPUs"},
+                    "target_gpu": {
+                        "type": "integer",
+                        "description": "GPU ID; omit to aggregate all GPUs",
+                    },
                 },
                 "required": [],
             },
@@ -1325,7 +1346,10 @@ TOOLS_DIFF_OPENAI = [
                         "description": "0-based iteration index (from get_iteration_boundaries)",
                     },
                     "marker": {"type": "string", "description": "Iteration marker"},
-                    "target_gpu": {"type": "integer", "default": 0},
+                    "target_gpu": {
+                        "type": "integer",
+                        "description": "GPU ID; omit to aggregate all GPUs",
+                    },
                 },
                 "required": ["iteration_index"],
             },
@@ -1350,7 +1374,10 @@ TOOLS_DIFF_OPENAI = [
                         "type": "integer",
                         "description": "0-based iteration (optional)",
                     },
-                    "target_gpu": {"type": "integer", "default": 0},
+                    "target_gpu": {
+                        "type": "integer",
+                        "description": "GPU ID; omit to aggregate all GPUs",
+                    },
                 },
                 "required": ["nvtx_exact_match"],
             },
@@ -1366,7 +1393,10 @@ TOOLS_DIFF_OPENAI = [
                 "properties": {
                     "parent_path": {"type": "string"},
                     "iteration_index": {"type": "integer"},
-                    "target_gpu": {"type": "integer", "default": 0},
+                    "target_gpu": {
+                        "type": "integer",
+                        "description": "GPU ID; omit to aggregate all GPUs",
+                    },
                     "top_n": {"type": "integer", "default": 3},
                 },
                 "required": ["parent_path"],
@@ -1383,7 +1413,10 @@ TOOLS_DIFF_OPENAI = [
                 "properties": {
                     "kernel_name": {"type": "string"},
                     "iteration_index": {"type": "integer"},
-                    "target_gpu": {"type": "integer", "default": 0},
+                    "target_gpu": {
+                        "type": "integer",
+                        "description": "GPU ID; omit to aggregate all GPUs",
+                    },
                 },
                 "required": ["kernel_name"],
             },

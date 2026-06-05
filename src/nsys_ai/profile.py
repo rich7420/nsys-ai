@@ -362,7 +362,7 @@ class Profile:
     def kernels(self, device: int | None, trim: tuple[int, int] | None = None) -> list[dict]:
         """All kernels on a device (or all devices if None), optionally trimmed to a time window."""
         sql = """
-            SELECT k.start, k.[end], k.streamId, k.correlationId,
+            SELECT k.start, k.[end], k.deviceId, k.streamId, k.correlationId,
                    s.value as name, d.value as demangled
             FROM {kernel_table} k
             JOIN StringIds s ON k.shortName = s.id
@@ -533,25 +533,28 @@ class Profile:
 
     def memcpy_in_window(
         self,
-        device: int,
+        device: int | None,
         trim: tuple[int, int],
     ) -> dict:
         """
         Sum memcpy time in window by direction (H2D=1, D2H=2, D2D=8).
+        ``device=None`` aggregates across all devices (matches ``kernels``).
         Returns {h2d_ns, d2h_ns, d2d_ns, total_ns}; 0 when table or window empty.
         """
         out = {"h2d_ns": 0, "d2h_ns": 0, "d2d_ns": 0, "total_ns": 0}
         if "CUPTI_ACTIVITY_KIND_MEMCPY" not in self.schema.tables:
             return out
-        rows = self._duckdb_query(
-            """
+        sql = """
             SELECT copyKind, SUM([end] - start) AS total_ns
             FROM CUPTI_ACTIVITY_KIND_MEMCPY
-            WHERE deviceId = ? AND start >= ? AND [end] <= ?
-            GROUP BY copyKind
-            """,
-            [device, trim[0], trim[1]],
-        )
+            WHERE start >= ? AND [end] <= ?
+        """
+        params: list = [trim[0], trim[1]]
+        if device is not None:
+            sql += " AND deviceId = ?"
+            params.append(device)
+        sql += " GROUP BY copyKind"
+        rows = self._duckdb_query(sql, params)
         for r in rows:
             kind = int(r["copyKind"])
             ns = int(r["total_ns"] or 0)

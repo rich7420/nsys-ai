@@ -899,6 +899,52 @@ def test_diff_tools_region_diff_and_stubs(tmp_path):
     assert "error" in mem
 
 
+def test_diff_tools_default_target_gpu_aggregates_all_gpus(tmp_path):
+    """Omitting target_gpu aggregates every device; an explicit id scopes to one.
+
+    The dispatcher and the diff_tools function signatures default target_gpu
+    to None, which means "all GPUs". A query that does not name a device must
+    therefore report the combined compute time of a multi-GPU profile, not
+    just GPU 0.
+    """
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff_tools import DiffContext, get_region_diff, run_diff_tool
+
+    # GPU 0 runs a 10ms kernel, GPU 1 a 20ms kernel, both inside "step" and both
+    # on stream 7. Reusing the same streamId across devices checks that the
+    # per-GPU detail fields aggregate by (deviceId, streamId), not streamId alone
+    # (streamId is device-scoped, so a naive count would collapse to one).
+    kernels = [
+        (0, 10_000_000, 0, 7, 1, 1, 2),  # deviceId 0, kA, 10ms, stream 7
+        (0, 20_000_000, 1, 7, 2, 3, 4),  # deviceId 1, kB, 20ms, stream 7
+    ]
+    nvtx = [("step", 1, 0, 20_000_000)]
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=kernels, nvtx=nvtx)
+    _make_profile(str(after), kernels=kernels, nvtx=nvtx)
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        ctx = DiffContext(before=b, after=a, trim=None, marker="step")
+
+        # Default (target_gpu omitted): both devices counted → 10 + 20 = 30ms,
+        # and the detail fields count two distinct (deviceId, streamId) pairs
+        # even though both devices reuse streamId 7.
+        all_gpus = get_region_diff(ctx, "step")
+        assert all_gpus["top3_global_categories"]["Compute"]["before"] == 30.0
+        assert all_gpus["unique_streams_count_before"] == 2
+
+        # Explicit device still scopes to that GPU only → 10ms and one stream.
+        gpu0 = get_region_diff(ctx, "step", target_gpu=0)
+        assert gpu0["top3_global_categories"]["Compute"]["before"] == 10.0
+        assert gpu0["unique_streams_count_before"] == 1
+
+        # Dispatching without target_gpu in args matches the all-GPU default.
+        dispatched = run_diff_tool(ctx, "get_region_diff", {"nvtx_exact_match": "step"})
+        assert dispatched["top3_global_categories"]["Compute"]["before"] == 30.0
+        assert dispatched["unique_streams_count_before"] == 2
+
+
 def test_get_launch_config_diff_returns_config_delta_and_explanation(tmp_path):
     from nsys_ai import profile as profile_mod
     from nsys_ai.diff_tools import DiffContext, get_launch_config_diff
