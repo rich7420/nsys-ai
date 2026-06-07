@@ -773,14 +773,28 @@ def _format_dims(values: list[int | None] | None) -> str:
 def _format_bytes(value: int | None) -> str:
     if value is None:
         return "?"
+    if value < 0:
+        return "-" + _format_bytes(-value)
     if value == 0:
         return "0B"
     if value % 1024 == 0:
         kib = value // 1024
         if kib % 1024 == 0:
-            return f"{kib // 1024}MiB"
+            mib = kib // 1024
+            if mib % 1024 == 0:
+                return f"{mib // 1024}GiB"
+            return f"{mib}MiB"
         return f"{kib}KiB"
     return f"{value}B"
+
+
+def _format_signed_bytes(value: int | None) -> str:
+    if value is None:
+        return "?"
+    if value == 0:
+        return "0B"
+    sign = "+" if value > 0 else "-"
+    return sign + _format_bytes(abs(value))
 
 
 def _scalar_delta(before: int | None, after: int | None) -> int | None:
@@ -905,7 +919,7 @@ def _query_launch_config(
     return dominant
 
 
-def _resolve_launch_config_windows(
+def _resolve_diff_windows(
     ctx: DiffContext,
     iteration_index: int | None,
     target_gpu: int | None,
@@ -947,6 +961,14 @@ def _resolve_launch_config_windows(
             },
         )
     return trim_before, trim_after, None
+
+
+def _resolve_launch_config_windows(
+    ctx: DiffContext,
+    iteration_index: int | None,
+    target_gpu: int | None,
+) -> tuple[tuple[int, int] | None, tuple[int, int] | None, dict | None]:
+    return _resolve_diff_windows(ctx, iteration_index, target_gpu)
 
 
 def _build_launch_delta(before: dict | None, after: dict | None) -> dict:
@@ -1161,6 +1183,329 @@ def get_gpu_imbalance_stats(
     return {"iteration_index": iteration_index, "per_gpu": per_gpu}
 
 
+_MEMORY_USAGE_TABLE = "CUDA_GPU_MEMORY_USAGE_EVENTS"
+_MEMORY_REQUIRED_COLS = ("start", "bytes", "memoryOperationType")
+_MEMORY_DELTA_FIELDS = (
+    "peak_vram_bytes",
+    "baseline_vram_bytes",
+    "final_vram_bytes",
+    "allocated_bytes",
+    "freed_bytes",
+    "net_delta_bytes",
+    "alloc_count",
+    "free_count",
+    "event_count",
+    "host_event_count",
+    "unknown_event_count",
+)
+# memKind 0/1 are Pageable / Pinned host memory and never consume VRAM.
+_HOST_MEM_KINDS = (0, 1)
+
+
+def _memory_table_columns(prof: Profile) -> list[str]:
+    if _MEMORY_USAGE_TABLE not in prof.schema.tables:
+        return []
+    try:
+        return prof.adapter.get_table_columns(_MEMORY_USAGE_TABLE)
+    except Exception:
+        try:
+            if prof.db is not None:
+                rows = prof._duckdb_query(f"DESCRIBE {_MEMORY_USAGE_TABLE}")
+                return [r.get("column_name") or r.get("name") or "" for r in rows]
+            with prof._lock:
+                return [
+                    r[1]
+                    for r in prof.conn.execute(
+                        f"PRAGMA table_info({_MEMORY_USAGE_TABLE})"
+                    ).fetchall()
+                ]
+        except Exception:
+            return []
+
+
+def _missing_memory_columns(cols: list[str]) -> list[str]:
+    colset = set(cols)
+    return [col for col in _MEMORY_REQUIRED_COLS if col not in colset]
+
+
+def _normalize_memory_profile_row(
+    row: dict,
+    *,
+    trim: tuple[int, int] | None,
+    target_gpu: int | None,
+    mem_kind_available: bool,
+    distinct_contexts: int | None,
+    mem_kind_breakdown: list,
+) -> dict:
+    baseline = int(row.get("baseline_vram_bytes") or 0)
+    peak_after_event = row.get("peak_after_event_bytes")
+    peak_after_event_int = int(peak_after_event) if peak_after_event is not None else baseline
+    peak = max(baseline, peak_after_event_int)
+    net_delta = int(row.get("net_delta_bytes") or 0)
+    first_event = row.get("first_event_ns")
+    last_event = row.get("last_event_ns")
+
+    out = {
+        "target_gpu": target_gpu,
+        "trim_ns": list(trim) if trim else None,
+        "mem_kind_available": mem_kind_available,
+        "peak_vram_bytes": peak,
+        "baseline_vram_bytes": baseline,
+        "final_vram_bytes": baseline + net_delta,
+        "allocated_bytes": int(row.get("allocated_bytes") or 0),
+        "freed_bytes": int(row.get("freed_bytes") or 0),
+        "net_delta_bytes": net_delta,
+        "alloc_count": int(row.get("alloc_count") or 0),
+        "free_count": int(row.get("free_count") or 0),
+        "event_count": int(row.get("event_count") or 0),
+        "host_event_count": int(row.get("host_event_count") or 0),
+        "unknown_event_count": int(row.get("unknown_event_count") or 0),
+    }
+    if distinct_contexts is not None:
+        out["distinct_contexts"] = distinct_contexts
+    if mem_kind_breakdown:
+        out["mem_kind_breakdown"] = mem_kind_breakdown
+    if first_event is not None and last_event is not None:
+        out["event_window_ns"] = [int(first_event), int(last_event)]
+    return out
+
+
+def _query_memory_profile(
+    prof: Profile,
+    trim: tuple[int, int] | None,
+    target_gpu: int | None,
+    cols: list[str],
+) -> dict:
+    colset = set(cols)
+    has_mem_kind = "memKind" in colset
+    has_context = "contextId" in colset
+
+    scope_where = "1=1"
+    scope_params: list = []
+    if target_gpu is not None:
+        scope_where = "deviceId = ?"
+        scope_params = [int(target_gpu)]
+
+    # Events CTE pulls everything up to the window end so the running balance and
+    # the pre-window baseline are correct; the window filter is applied afterwards.
+    events_where = scope_where
+    events_params = list(scope_params)
+    if trim is not None:
+        events_where += " AND start <= ?"
+        events_params.append(int(trim[1]))
+
+    # In-window raw filter, for the per-kind / per-context breakdown sub-queries.
+    inwin_where = scope_where
+    inwin_params = list(scope_params)
+    if trim is not None:
+        inwin_where += " AND start >= ? AND start <= ?"
+        inwin_params += [int(trim[0]), int(trim[1])]
+
+    if trim is not None:
+        window_where = "event_start >= ? AND event_start <= ?"
+        window_params: list = [int(trim[0]), int(trim[1])]
+        baseline_expr = (
+            "(SELECT COALESCE(SUM(delta_bytes), 0) FROM events WHERE event_start < ?) "
+            "AS baseline_vram_bytes"
+        )
+        baseline_params: list = [int(trim[0])]
+    else:
+        window_where = "1=1"
+        window_params = []
+        baseline_expr = "0 AS baseline_vram_bytes"
+        baseline_params = []
+
+    # memKind 0/1 = host (pageable/pinned), never VRAM; 2/3 device, 4/6 managed,
+    # 5 device-static are device-resident (documented Nsight ENUM_CUDA_MEM_KIND).
+    # Without the column we cannot tell, so count every event (best effort).
+    is_device = (
+        "CASE WHEN CAST(memKind AS INTEGER) IN (0, 1) THEN 0 ELSE 1 END" if has_mem_kind else "1"
+    )
+
+    # memoryOperationType: 0 = alloc, 1 = free. Allocs sort before frees at equal
+    # timestamps so a same-ts alloc+free still registers the high-water mark.
+    sql = f"""
+        WITH events AS (
+            SELECT
+                CAST(start AS BIGINT) AS event_start,
+                CAST(memoryOperationType AS INTEGER) AS op,
+                CAST(COALESCE(bytes, 0) AS BIGINT) AS bytes,
+                {is_device} AS is_device,
+                CASE
+                    WHEN {is_device} = 0 THEN 0
+                    WHEN memoryOperationType = 0 THEN CAST(COALESCE(bytes, 0) AS BIGINT)
+                    WHEN memoryOperationType = 1 THEN -CAST(COALESCE(bytes, 0) AS BIGINT)
+                    ELSE 0
+                END AS delta_bytes
+            FROM {_MEMORY_USAGE_TABLE}
+            WHERE {events_where}
+        ),
+        running AS (
+            SELECT
+                event_start,
+                op,
+                bytes,
+                is_device,
+                delta_bytes,
+                SUM(delta_bytes) OVER (
+                    ORDER BY event_start, CASE WHEN op = 0 THEN 0 ELSE 1 END
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS balance_bytes
+            FROM events
+        ),
+        windowed AS (
+            SELECT * FROM running WHERE {window_where}
+        )
+        SELECT
+            COUNT(*) AS event_count,
+            COALESCE(SUM(CASE WHEN is_device = 0 THEN 1 ELSE 0 END), 0) AS host_event_count,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 0 THEN 1 ELSE 0 END), 0) AS alloc_count,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 1 THEN 1 ELSE 0 END), 0) AS free_count,
+            COALESCE(SUM(CASE WHEN op IS NULL OR op NOT IN (0, 1) THEN 1 ELSE 0 END), 0)
+                AS unknown_event_count,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 0 THEN bytes ELSE 0 END), 0)
+                AS allocated_bytes,
+            COALESCE(SUM(CASE WHEN is_device = 1 AND op = 1 THEN bytes ELSE 0 END), 0)
+                AS freed_bytes,
+            COALESCE(SUM(delta_bytes), 0) AS net_delta_bytes,
+            MIN(event_start) AS first_event_ns,
+            MAX(event_start) AS last_event_ns,
+            MAX(balance_bytes) AS peak_after_event_bytes,
+            {baseline_expr}
+        FROM windowed
+    """
+    row = prof._duckdb_query(sql, events_params + window_params + baseline_params)[0]
+
+    distinct_contexts = None
+    if has_context:
+        ctx_rows = prof._duckdb_query(
+            f"SELECT COUNT(DISTINCT contextId) AS n FROM {_MEMORY_USAGE_TABLE} WHERE {inwin_where}",
+            list(inwin_params),
+        )
+        distinct_contexts = int(ctx_rows[0].get("n") or 0) if ctx_rows else 0
+
+    mem_kind_breakdown: list = []
+    if has_mem_kind:
+        bk_rows = prof._duckdb_query(
+            f"""
+            SELECT
+                CAST(memKind AS INTEGER) AS mem_kind,
+                COALESCE(SUM(CASE WHEN memoryOperationType = 0 THEN 1 ELSE 0 END), 0) AS alloc_count,
+                COALESCE(SUM(CASE WHEN memoryOperationType = 1 THEN 1 ELSE 0 END), 0) AS free_count
+            FROM {_MEMORY_USAGE_TABLE}
+            WHERE {inwin_where}
+            GROUP BY CAST(memKind AS INTEGER)
+            ORDER BY mem_kind
+            """,
+            list(inwin_params),
+        )
+        for r in bk_rows:
+            mk = r.get("mem_kind")
+            mk_int = int(mk) if mk is not None else None
+            mem_kind_breakdown.append(
+                {
+                    "mem_kind": mk_int,
+                    "is_host": mk_int in _HOST_MEM_KINDS if mk_int is not None else False,
+                    "alloc_count": int(r.get("alloc_count") or 0),
+                    "free_count": int(r.get("free_count") or 0),
+                }
+            )
+
+    return _normalize_memory_profile_row(
+        row,
+        trim=trim,
+        target_gpu=target_gpu,
+        mem_kind_available=has_mem_kind,
+        distinct_contexts=distinct_contexts,
+        mem_kind_breakdown=mem_kind_breakdown,
+    )
+
+
+def _build_memory_delta(before: dict, after: dict) -> dict:
+    delta: dict = {}
+    for metric in _MEMORY_DELTA_FIELDS:
+        delta[metric] = _delta_entry(before.get(metric), after.get(metric))
+    return delta
+
+
+def _memory_columns_used(cols: list[str]) -> list[str]:
+    used = [col for col in _MEMORY_REQUIRED_COLS if col in cols]
+    for opt in ("deviceId", "memKind", "contextId"):
+        if opt in cols:
+            used.append(opt)
+    return used
+
+
+def _memory_profile_explanation(before: dict, after: dict, delta: dict) -> str:
+    if before["event_count"] == 0 and after["event_count"] == 0:
+        if before["baseline_vram_bytes"] or after["baseline_vram_bytes"]:
+            return (
+                "No GPU alloc/free events occurred in the selected window; peak VRAM "
+                "stayed at the pre-window balance."
+            )
+        return (
+            "Memory capture is present, but no GPU alloc/free events were found "
+            "in the selected window."
+        )
+
+    parts: list[str] = []
+    peak_delta = delta["peak_vram_bytes"]["delta"]
+    net_delta_change = delta["net_delta_bytes"]["delta"]
+    alloc_count_delta = delta["alloc_count"]["delta"]
+    free_count_delta = delta["free_count"]["delta"]
+
+    if peak_delta:
+        parts.append(
+            "peak VRAM "
+            f"{_format_bytes(before['peak_vram_bytes'])} -> "
+            f"{_format_bytes(after['peak_vram_bytes'])} "
+            f"({_format_signed_bytes(peak_delta)})"
+        )
+    if alloc_count_delta or free_count_delta:
+        parts.append(
+            "alloc/free events "
+            f"{before['alloc_count']}/{before['free_count']} -> "
+            f"{after['alloc_count']}/{after['free_count']}"
+        )
+    if net_delta_change or before["net_delta_bytes"] or after["net_delta_bytes"]:
+        parts.append(
+            "net allocation "
+            f"{_format_signed_bytes(before['net_delta_bytes'])} -> "
+            f"{_format_signed_bytes(after['net_delta_bytes'])}"
+        )
+
+    if not parts:
+        return (
+            "GPU memory profile is unchanged; this diff does not explain the regression "
+            "via allocation footprint or allocator churn."
+        )
+
+    if isinstance(peak_delta, int) and peak_delta > 0:
+        if isinstance(alloc_count_delta, int) and alloc_count_delta > 0:
+            suffix = (
+                " -> higher peak plus more allocation churn suggests memory pressure "
+                "or allocator churn."
+            )
+        else:
+            suffix = " -> higher peak VRAM suggests increased memory pressure."
+    elif isinstance(peak_delta, int) and peak_delta < 0:
+        suffix = " -> lower peak VRAM reduces memory pressure."
+    elif isinstance(net_delta_change, int) and net_delta_change > 0:
+        suffix = (
+            " -> more memory remains allocated by window end; check retained tensors "
+            "or allocator caching."
+        )
+    elif (
+        isinstance(alloc_count_delta, int)
+        and isinstance(free_count_delta, int)
+        and (alloc_count_delta > 0 or free_count_delta > 0)
+    ):
+        suffix = " -> allocation/free churn changed; inspect cudaMalloc/cudaFree behavior."
+    else:
+        suffix = " -> memory behavior changed; inspect allocation lifetime and caching."
+    return "; ".join(parts) + suffix
+
+
 def get_memory_profile_diff(
     ctx: DiffContext,
     iteration_index: int | None = None,
@@ -1169,9 +1514,65 @@ def get_memory_profile_diff(
     """
     Peak VRAM + alloc/free count (Stage 7). Returns error when memory capture not present.
     """
-    if "CUDA_GPU_MEMORY_USAGE_EVENTS" not in ctx.before.schema.tables:
-        return {"error": "not available", "reason": "Memory profiling not enabled (table missing)"}
-    return {"error": "not available", "reason": "Memory diff not yet implemented"}
+    before_has = _MEMORY_USAGE_TABLE in ctx.before.schema.tables
+    after_has = _MEMORY_USAGE_TABLE in ctx.after.schema.tables
+    before_cols = _memory_table_columns(ctx.before) if before_has else []
+    after_cols = _memory_table_columns(ctx.after) if after_has else []
+    if not before_has or not after_has:
+        return {
+            "error": "not available",
+            "reason": "Memory profiling not enabled in both profiles (table missing)",
+            "tables_present": {"before": before_has, "after": after_has},
+            "available_columns": {"before": before_cols, "after": after_cols},
+        }
+
+    missing_before = _missing_memory_columns(before_cols)
+    missing_after = _missing_memory_columns(after_cols)
+    if missing_before or missing_after:
+        return {
+            "error": "not available",
+            "reason": "Memory profiling table is missing required columns",
+            "missing_columns": {"before": missing_before, "after": missing_after},
+            "available_columns": {"before": before_cols, "after": after_cols},
+        }
+
+    if target_gpu is not None and ("deviceId" not in before_cols or "deviceId" not in after_cols):
+        return {
+            "error": "not available",
+            "reason": "target_gpu filtering requires deviceId in memory profiling table",
+            "available_columns": {"before": before_cols, "after": after_cols},
+        }
+
+    trim_before, trim_after, window_error = _resolve_diff_windows(
+        ctx, iteration_index, target_gpu
+    )
+    if window_error is not None:
+        return window_error
+
+    before_stats = _query_memory_profile(ctx.before, trim_before, target_gpu, before_cols)
+    after_stats = _query_memory_profile(ctx.after, trim_after, target_gpu, after_cols)
+    delta = _build_memory_delta(before_stats, after_stats)
+    explanation = _memory_profile_explanation(before_stats, after_stats, delta)
+    if not (before_stats["mem_kind_available"] and after_stats["mem_kind_available"]):
+        explanation += (
+            " Note: the memKind column is absent, so host vs device memory could not be "
+            "separated — these figures may include non-VRAM (host) allocations."
+        )
+    return {
+        "target_gpu": target_gpu,
+        "iteration_index": iteration_index,
+        "trim_before_ns": list(trim_before) if trim_before else None,
+        "trim_after_ns": list(trim_after) if trim_after else None,
+        "table": _MEMORY_USAGE_TABLE,
+        "columns_used": {
+            "before": _memory_columns_used(before_cols),
+            "after": _memory_columns_used(after_cols),
+        },
+        "before": before_stats,
+        "after": after_stats,
+        "delta": delta,
+        "explanation": explanation,
+    }
 
 
 # ── Phase C system prompt and tool metadata for agent integration ─────────────
