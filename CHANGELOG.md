@@ -9,6 +9,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- `nsys-ai doctor` diagnoses the environment (Python, nsys CLI, Parquet cache,
+  AI provider, CUTracer toolchain including the nvdisasm/framework CUDA match)
+  and, when given a profile, its health (duration, GPUs, GPU model, NVTX and
+  NCCL presence, profiler overhead). It stays a fast triage — single-digit
+  seconds even on multi-gigabyte, multi-GPU profiles — and defers the slow NCCL
+  eager/inductor call-mode split to `--deep`. Text and `--format json` output, a
+  `--strict` flag, and a non-zero exit on failures so it can gate CI. The same
+  report is reusable in-process by the web GUI and TUI, and the analysis skill
+  uses it as a preflight.
 - Before/after drill-down in the diff agent: compare a kernel's launch
   configuration (grid/block/registers/shared memory) and memory profile (peak
   VRAM and allocation/free deltas), and locate each top kernel regression to a

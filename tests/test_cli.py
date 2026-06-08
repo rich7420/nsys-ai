@@ -170,6 +170,50 @@ def test_agent_guide():
     assert "Available Skills" in result.stdout
 
 
+def test_doctor_no_profile():
+    """doctor without a profile reports environment checks and exits 0."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "doctor"], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert "System" in result.stdout
+    assert "Optional features" in result.stdout
+    assert "Summary:" in result.stdout
+
+
+def test_doctor_json():
+    """doctor --format json emits a versioned, parseable envelope."""
+    import json
+
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "doctor", "--format", "json"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["schema_version"] == "0.1"
+    assert payload["producer"] == "nsys-ai"
+    assert [s["name"] for s in payload["sections"]] == [
+        "System",
+        "Profile support",
+        "Optional features",
+    ]
+    assert "summary" in payload
+
+
+def test_doctor_with_profile(minimal_nsys_db_path):
+    """doctor on a profile adds a health section."""
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "doctor", minimal_nsys_db_path],
+        capture_output=True,
+        text=True,
+    )
+    # May exit 1 if the synthetic profile trips a FAIL check; output is what matters.
+    assert "Profile health" in result.stdout
+    assert "Duration" in result.stdout
+
+
 def test_skill_info():
     """skill info subcommand should return a JSON schema."""
     import json
