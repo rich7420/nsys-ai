@@ -284,22 +284,33 @@ class Profile:
 
         kernel_table = self.schema.kernel_table
 
-        devices = [
-            r[0]
-            for r in self.adapter.execute(
-                f"SELECT DISTINCT deviceId FROM {kernel_table} ORDER BY deviceId"
-            ).fetchall()
-        ]
-
+        # Single pass over the kernel table for devices, per-device streams,
+        # time range, total kernel count, and per-device kernel counts. These
+        # were five separate full scans; in direct-SQLite mode (large profiles)
+        # each scan is seconds, so collapsing them noticeably speeds up open.
+        # ORDER BY preserves the previous device/stream ordering exactly.
+        devices: list[int] = []
         streams: dict[int, list[int]] = {}
-        for r in self.adapter.execute(
-            f"SELECT DISTINCT deviceId, streamId FROM {kernel_table} ORDER BY deviceId, streamId"
+        kcounts: dict[int, int] = {}
+        kernel_count = 0
+        min_start = None
+        max_end = None
+        for dev, stream, mn, mx, cnt in self.adapter.execute(
+            f"SELECT deviceId, streamId, MIN(start), MAX([end]), COUNT(*) "
+            f"FROM {kernel_table} GROUP BY deviceId, streamId ORDER BY deviceId, streamId"
         ).fetchall():
-            streams.setdefault(r[0], []).append(r[1])
+            if dev not in streams:
+                streams[dev] = []
+                kcounts[dev] = 0
+                devices.append(dev)
+            streams[dev].append(stream)
+            kcounts[dev] += cnt
+            kernel_count += cnt
+            if mn is not None:
+                min_start = mn if min_start is None else min(min_start, mn)
+            if mx is not None:
+                max_end = mx if max_end is None else max(max_end, mx)
 
-        tr = self.adapter.execute(f"SELECT MIN(start), MAX([end]) FROM {kernel_table}").fetchone()
-
-        kc = self.adapter.execute(f"SELECT COUNT(*) FROM {kernel_table}").fetchone()[0]
         nc = (
             self.adapter.execute("SELECT COUNT(*) FROM NVTX_EVENTS").fetchone()[0]
             if "NVTX_EVENTS" in tables
@@ -309,24 +320,18 @@ class Profile:
         return ProfileMeta(
             devices=devices,
             streams=streams,
-            time_range=(tr[0] or 0, tr[1] or 0),
-            kernel_count=kc,
+            time_range=(min_start or 0, max_end or 0),
+            kernel_count=kernel_count,
             nvtx_count=nc,
             tables=tables,
-            gpu_info=self._gpu_info(devices, streams, tables),
+            gpu_info=self._gpu_info(devices, streams, tables, kcounts),
         )
 
-    def _gpu_info(self, devices, streams, tables) -> dict[int, GpuInfo]:
-        """Query hardware metadata per GPU."""
+    def _gpu_info(self, devices, streams, tables, kcounts) -> dict[int, GpuInfo]:
+        """Build per-GPU metadata. Per-device kernel counts come from the
+        single scan in :meth:`_discover`; only hardware metadata is queried here."""
         info: dict[int, GpuInfo] = {}
-
-        # Kernel counts per device
-        kcounts = {}
         query_conn = self.db if self.db is not None else self.conn
-        for r in query_conn.execute(
-            f"SELECT deviceId, COUNT(*) FROM {self.schema.kernel_table} GROUP BY deviceId"
-        ).fetchall():
-            kcounts[r[0]] = r[1]
 
         # Hardware info from TARGET_INFO_GPU + TARGET_INFO_CUDA_DEVICE
         hw = {}
