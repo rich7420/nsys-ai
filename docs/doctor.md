@@ -102,7 +102,7 @@ and profile health in one place.
   "profile_path": "profile.sqlite",
   "profile_id": "nsys1:sha256:...",
   "sections": [
-    {"name": "System", "checks": [{"name": "Python", "status": "ok", "detail": "3.12.3", "hint": null}]}
+    {"name": "System", "checks": [{"name": "Python", "status": "ok", "detail": "3.12.3", "hint": null, "sub": false}]}
   ],
   "summary": {"ok": 12, "warn": 1, "fail": 0, "not_configured": 2, "skipped": 0}
 }

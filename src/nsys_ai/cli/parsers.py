@@ -72,9 +72,6 @@ def _register_doctor_parser(sub):
         help="Optional profile (.sqlite or .nsys-rep) for a health summary",
     )
     p.add_argument(
-        "--gpu", type=int, default=None, help="GPU device ID for the health summary"
-    )
-    p.add_argument(
         "--format", choices=["text", "json"], default="text", help="Output format"
     )
     p.add_argument(

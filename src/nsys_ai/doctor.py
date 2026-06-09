@@ -1,16 +1,18 @@
 """doctor.py — environment and profile-health diagnostics for nsys-ai.
 
-``run_doctor()`` returns a structured :class:`DoctorReport` that every surface
-consumes the same way:
+``run_doctor()`` returns a structured :class:`DoctorReport` with a stable
+``to_dict()`` contract, so any surface can render it the same way. Live
+consumers today:
 
-* CLI       — ``format_doctor_text(report)`` for humans, ``report.to_dict()`` for ``--format json``.
-* Web GUI   — a ``/api/doctor`` route serves ``report.to_dict()``.
-* TUI       — a health badge / panel reads the same report.
-* Claude    — the ``nsys-ai`` skill runs ``nsys-ai doctor --format json`` as a preflight.
+* CLI    — ``format_doctor_text(report)`` for humans, ``report.to_dict()`` for
+  ``--format json``.
+* Claude — the ``nsys-ai`` analysis skill runs ``nsys-ai doctor --format json``
+  as a preflight and steers on the result (see ``skills/analyze/SKILL.md``).
 
-All detection logic lives here, never in the CLI handler, so ``web.py`` and the
-TUI can ``import nsys_ai.doctor`` and call ``run_doctor(...)`` in-process without
-shelling out.
+All detection logic lives here rather than in the CLI handler, so an in-process
+surface — a future ``web.py`` ``/api/doctor`` route, or a TUI health panel — can
+``import nsys_ai.doctor`` and call ``run_doctor(...)`` directly, without shelling
+out or duplicating the checks.
 
 Scope: this checks the *analysis* environment (can we read and analyze this
 profile, are optional features configured) and the *quality* of a profile (is
@@ -407,12 +409,13 @@ def _nccl_kernel_count(prof: Any) -> int | None:
         return None
 
 
-def _nccl_call_modes(prof: Any, device: int) -> str | None:
+def _nccl_call_modes(prof: Any) -> str | None:
     """eager / inductor-captured / temporal-only split via the breakdown skill.
 
     Runs ``nccl_compile_context_breakdown``, which joins ``nvtx_kernel_map`` and
     can take minutes on an NVTX-heavy profile — so doctor only calls this under
-    ``--deep``, never on the default fast path.
+    ``--deep``, never on the default fast path. The split is profile-wide (the
+    skill classifies every NCCL kernel by its leaf NVTX scope, not per device).
     """
     try:
         from nsys_ai.skills.registry import get_skill
@@ -420,7 +423,11 @@ def _nccl_call_modes(prof: Any, device: int) -> str | None:
         skill = get_skill("nccl_compile_context_breakdown")
         if skill is None:
             return None
-        rows = skill.execute(_skill_conn(prof), device=device)
+        # Pass the source .sqlite path so NVTX attribution works even when the
+        # skill runs against the DuckDB/Parquet cache connection.
+        rows = skill.execute(
+            _skill_conn(prof), _sqlite_path=getattr(prof, "path", None)
+        )
     except Exception:  # noqa: BLE001
         return None
 
@@ -497,11 +504,10 @@ def _overhead_check(pct: float | None) -> CheckResult:
     return CheckResult("Profiler overhead", "ok", f"{pct:.1f}%")
 
 
-def _check_profile_health(prof: Any, device: int | None, *, deep: bool = False) -> DoctorSection:
+def _check_profile_health(prof: Any, *, deep: bool = False) -> DoctorSection:
     checks: list[CheckResult] = []
     meta = prof.meta
     devices = list(meta.devices or [])
-    dev = device if device is not None else (devices[0] if devices else 0)
     span_ns = (meta.time_range[1] - meta.time_range[0]) if meta.time_range else 0
 
     checks.append(CheckResult("Duration", "ok", f"{span_ns / 1e9:.1f}s"))
@@ -546,7 +552,7 @@ def _check_profile_health(prof: Any, device: int | None, *, deep: bool = False) 
         # The eager/inductor/temporal split joins the NVTX map and can take
         # minutes on an NVTX-heavy profile, so keep it off the fast path.
         if deep:
-            modes = _nccl_call_modes(prof, dev)
+            modes = _nccl_call_modes(prof)
             if modes:
                 checks.append(CheckResult("NCCL by call mode", "ok", modes, sub=True))
             else:
@@ -590,7 +596,6 @@ def run_doctor(
     profile_path: str | None = None,
     *,
     profile: Any = None,
-    device: int | None = None,
     include_env: bool = True,
     include_health: bool = True,
     deep: bool = False,
@@ -604,6 +609,10 @@ def run_doctor(
       sections so a surface can request only what it needs.
     *deep* — also run slow checks (e.g. the NCCL eager/inductor call-mode split,
       which joins the NVTX map). Off by default to keep doctor a fast triage.
+
+    The health section is profile-wide (duration, GPU count/model, NVTX/NCCL
+    presence, overhead all aggregate across devices), so there is no per-device
+    scoping knob.
     """
     sections: list[DoctorSection] = []
     if include_env:
@@ -641,7 +650,7 @@ def run_doctor(
                 profile_id = _safe_profile_id(prof, profile_path)
                 # _check_profile_health is internally best-effort; each enrichment
                 # degrades to a skipped check rather than raising.
-                sections.append(_check_profile_health(prof, device, deep=deep))
+                sections.append(_check_profile_health(prof, deep=deep))
             finally:
                 if own:
                     try:

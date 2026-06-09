@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from nsys_ai.doctor import (
     DoctorReport,
+    _overhead_check,
     format_doctor_text,
     run_doctor,
 )
@@ -103,3 +106,24 @@ def test_missing_profile_is_reported_as_failure(tmp_path):
 def test_health_only_mode_has_no_env(minimal_nsys_db_path):
     report = run_doctor(minimal_nsys_db_path, include_env=False)
     assert [s.name for s in report.sections] == ["Profile health"]
+
+
+# ---------------------------------------------------------------------------
+# Profiler-overhead thresholds (pure function)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "pct, expected",
+    [
+        (None, "skipped"),  # no overhead table
+        (5.0, "ok"),  # below warn
+        (10.0, "ok"),  # exactly at warn boundary (strictly-greater triggers)
+        (15.0, "warn"),  # warn band
+        (20.0, "warn"),  # exactly at fail boundary (strictly-greater triggers)
+        (25.0, "fail"),  # fail band
+        (150.0, "skipped"),  # physically impossible -> unreliable, not a failure
+    ],
+)
+def test_overhead_check_thresholds(pct, expected):
+    assert _overhead_check(pct).status == expected

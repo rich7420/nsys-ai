@@ -393,7 +393,6 @@ def _cmd_doctor(args, _profile):
     profile_path = getattr(args, "profile", None)
     report = run_doctor(
         profile_path,
-        device=getattr(args, "gpu", None),
         deep=getattr(args, "deep", False),
     )
 

@@ -214,6 +214,18 @@ def test_doctor_with_profile(minimal_nsys_db_path):
     assert "Duration" in result.stdout
 
 
+def test_doctor_missing_profile_exits_nonzero(tmp_path):
+    """A missing profile is a FAIL, so doctor exits non-zero (can gate CI)."""
+    missing = str(tmp_path / "nope.sqlite")
+    result = subprocess.run(
+        [sys.executable, "-m", "nsys_ai", "doctor", missing],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "FAIL" in result.stdout
+
+
 def test_skill_info():
     """skill info subcommand should return a JSON schema."""
     import json
