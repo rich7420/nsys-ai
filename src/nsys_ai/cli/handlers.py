@@ -380,6 +380,34 @@ def _cmd_info(args, _profile):
             )
 
 
+def _cmd_doctor(args, _profile):
+    """Diagnose the environment and (optionally) a profile's health.
+
+    Exit code follows the brew/npm consensus: warnings are exit 0, failures
+    are non-zero. ``--strict`` promotes warnings to failures for CI use.
+    """
+    import json as _json
+
+    from nsys_ai.doctor import format_doctor_text, run_doctor
+
+    profile_path = getattr(args, "profile", None)
+    report = run_doctor(
+        profile_path,
+        deep=getattr(args, "deep", False),
+    )
+
+    fmt = getattr(args, "format", "text") or "text"
+    if fmt == "json":
+        print(_json.dumps(report.to_dict(), indent=2))
+    else:
+        print(format_doctor_text(report, verbose=getattr(args, "verbose", False)))
+
+    if report.has_failures():
+        sys.exit(1)
+    if getattr(args, "strict", False) and report.has_warnings():
+        sys.exit(1)
+
+
 def _cmd_analyze(args, _profile):
     fmt = getattr(args, "format", "text") or "text"
     if fmt == "json":
