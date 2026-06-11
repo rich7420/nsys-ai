@@ -339,6 +339,10 @@ pip install -e '.[dev]'
 pytest tests/ -v
 ```
 
+**Guided optimization loop** (diagnose → propose → re-profile → diff → accept): see [docs/guided-loop-setup.md](docs/guided-loop-setup.md).
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
