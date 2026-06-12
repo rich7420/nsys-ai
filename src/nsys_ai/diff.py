@@ -381,11 +381,74 @@ def _classify_delta(delta_ns: int, before_ns: int, after_ns: int) -> str:
     return "neutral"
 
 
+def _slowest_instances(
+    prof: Profile,
+    keys: list[str],
+    gpu: int | None,
+    trim: tuple[int, int] | None,
+) -> dict[str, tuple[int, int]]:
+    """Map kernel key -> (start_ns, end_ns) of its slowest single instance.
+
+    Scoped to the same device/window as the diff. Anchoring the slowest
+    instance keeps the selection tight; a kernel's full MIN..MAX invocation
+    envelope typically spans most of the timeline for steady-state kernels.
+    Best effort: kernels with no instances here (e.g. removed ones, which only
+    exist in the before profile) simply get no time bounds.
+    """
+    if not keys or not prof.schema.kernel_table:
+        return {}
+    placeholders = ",".join("?" for _ in keys)
+    # Key matches build_profile_summary: demangled name if non-empty, else short.
+    key_expr = "COALESCE(NULLIF(d.value, ''), s.value)"
+    sql = f"""
+        WITH ranked AS (
+            SELECT
+                {key_expr} AS key,
+                k.start AS start_ns,
+                k.[end] AS end_ns,
+                ROW_NUMBER() OVER (
+                    PARTITION BY {key_expr}
+                    ORDER BY (k.[end] - k.start) DESC, k.start ASC
+                ) AS rn
+            FROM {prof.schema.kernel_table} k
+            JOIN StringIds s ON k.shortName = s.id
+            JOIN StringIds d ON k.demangledName = d.id
+            WHERE (d.value IN ({placeholders}) OR s.value IN ({placeholders}))
+    """
+    params: list = list(keys) + list(keys)
+    if gpu is not None:
+        sql += " AND k.deviceId = ?"
+        params.append(gpu)
+    if trim:
+        sql += " AND k.start >= ? AND k.[end] <= ?"
+        params += list(trim)
+    sql += """
+        )
+        SELECT key, start_ns, end_ns FROM ranked WHERE rn = 1
+    """
+    try:
+        rows = prof._duckdb_query(sql, params)
+    except Exception:
+        # Schema variations must not break the diff; selections degrade to
+        # name+GPU anchors without time bounds.
+        _log.debug("slowest-instance lookup failed", exc_info=True)
+        return {}
+    out: dict[str, tuple[int, int]] = {}
+    for r in rows:
+        key = str(r.get("key") or "")
+        start_ns = r.get("start_ns")
+        end_ns = r.get("end_ns")
+        if key and start_ns is not None and end_ns is not None:
+            out[key] = (int(start_ns), int(end_ns))
+    return out
+
+
 def _diff_selection(
     kd: KernelDiff,
     profile_id: str,
     gpu: int | None,
     diff_id: str,
+    bounds: tuple[int, int] | None = None,
 ) -> TraceSelection:
     selection_key = json.dumps(
         {
@@ -405,6 +468,8 @@ def _diff_selection(
         id=f"sel_diff_{key_hash}",
         profile_id=profile_id,
         source="diff",
+        start_ns=bounds[0] if bounds else None,
+        end_ns=bounds[1] if bounds else None,
         gpu_ids=[gpu] if gpu is not None else None,
         label=f"{kd.name} {delta_ms:+.2f}ms",
     )
@@ -525,12 +590,24 @@ def diff_profiles(
     )
     limited_regressions = regressions[: max(0, int(limit))]
     limited_improvements = improvements[: max(0, int(limit))]
+    bound_keys = sorted({k.key for k in limited_regressions + limited_improvements})
+    instance_bounds = _slowest_instances(after_prof, bound_keys, gpu, t_after)
     limited_regressions = [
-        replace(k, selection=_diff_selection(k, after.profile_id, gpu, diff_id))
+        replace(
+            k,
+            selection=_diff_selection(
+                k, after.profile_id, gpu, diff_id, bounds=instance_bounds.get(k.key)
+            ),
+        )
         for k in limited_regressions
     ]
     limited_improvements = [
-        replace(k, selection=_diff_selection(k, after.profile_id, gpu, diff_id))
+        replace(
+            k,
+            selection=_diff_selection(
+                k, after.profile_id, gpu, diff_id, bounds=instance_bounds.get(k.key)
+            ),
+        )
         for k in limited_improvements
     ]
 

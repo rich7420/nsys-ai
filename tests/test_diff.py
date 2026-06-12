@@ -425,6 +425,112 @@ def test_diff_node_wide_selection_omits_gpu_ids(tmp_path):
     assert "gpu_ids" not in selection.to_dict()
 
 
+def test_diff_selection_anchors_slowest_after_instance(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    # kA twice in after: 10ms and 30ms. Bounds must be the slowest instance,
+    # not the MIN..MAX envelope (0..50ms).
+    _make_profile(
+        str(after),
+        kernels=[
+            (0, 10_000_000, 0, 7, 1, 1, 2),
+            (20_000_000, 50_000_000, 0, 7, 2, 1, 2),
+        ],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=0, limit=10)
+
+    selection = diff.top_regressions[0].selection
+    assert selection is not None
+    assert selection.start_ns == 20_000_000
+    assert selection.end_ns == 50_000_000
+    sel_dict = selection.to_dict()
+    assert sel_dict["start_ns"] == 20_000_000
+    assert sel_dict["end_ns"] == 50_000_000
+
+
+def test_diff_selection_bounds_respect_trim_window(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    # The slowest kA instance (200..260ms) sits outside the trim window and
+    # must not be chosen as the anchor.
+    _make_profile(
+        str(after),
+        kernels=[
+            (0, 30_000_000, 0, 7, 1, 1, 2),
+            (200_000_000, 260_000_000, 0, 7, 2, 1, 2),
+        ],
+    )
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=0, trim=(0, 100_000_000), limit=10)
+
+    selection = diff.top_regressions[0].selection
+    assert selection is not None
+    assert selection.start_ns == 0
+    assert selection.end_ns == 30_000_000
+
+
+def test_diff_selection_removed_kernel_has_no_time_bounds(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    # kB exists only in before -> "removed" improvement; it has no instances in
+    # the after profile, so its selection stays a name+GPU anchor.
+    _make_profile(
+        str(before),
+        kernels=[
+            (0, 10_000_000, 0, 7, 1, 1, 2),
+            (10_000_000, 15_000_000, 0, 7, 2, 3, 4),
+        ],
+    )
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=0, limit=10)
+
+    removed = [k for k in diff.top_improvements if k.classification == "removed"]
+    assert removed, "expected kB to be a removed improvement"
+    selection = removed[0].selection
+    assert selection is not None
+    assert selection.start_ns is None
+    assert "start_ns" not in selection.to_dict()
+    # The regressed kernel still gets bounds from its after instance.
+    reg_sel = diff.top_regressions[0].selection
+    assert reg_sel.start_ns == 0
+    assert reg_sel.end_ns == 30_000_000
+
+
+def test_diff_selection_time_bounds_serialize_to_json(tmp_path):
+    from nsys_ai import profile as profile_mod
+    from nsys_ai.diff import diff_profiles
+    from nsys_ai.diff_render import to_diff_json
+
+    before = tmp_path / "before.sqlite"
+    after = tmp_path / "after.sqlite"
+    _make_profile(str(before), kernels=[(0, 10_000_000, 0, 7, 1, 1, 2)])
+    _make_profile(str(after), kernels=[(0, 30_000_000, 0, 7, 1, 1, 2)])
+
+    with profile_mod.open(str(before)) as b, profile_mod.open(str(after)) as a:
+        diff = diff_profiles(b, a, gpu=0, limit=10)
+
+    payload = json.loads(to_diff_json(diff))
+    selection = payload["top_regressions"][0]["selection"]
+    assert selection["start_ns"] == 0
+    assert selection["end_ns"] == 30_000_000
+
+
 def test_diff_without_top_regressions_has_empty_selection_lists(tmp_path):
     from nsys_ai import profile as profile_mod
     from nsys_ai.diff import diff_profiles
