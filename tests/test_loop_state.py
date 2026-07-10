@@ -1,7 +1,10 @@
+import json
 import os
 import shutil
 import time
 from pathlib import Path
+
+import pytest
 
 from nsys_ai import profile as _profile
 from nsys_ai.loop_state import (
@@ -84,6 +87,95 @@ def test_detect_h100_replay_preset(monkeypatch, tmp_path):
     assert out is not None
     assert out["before_path"].endswith("perf_h100_sp1.sqlite")
     assert out["after_path"].endswith("perf_h100_sp1_fa3.sqlite")
+
+
+def test_set_decision_writes_diff_json_matching_cli_shape(minimal_nsys_db_path, tmp_path):
+    before = Path(minimal_nsys_db_path)
+    after = tmp_path / "after.sqlite"
+    shutil.copy(before, after)
+
+    state = DiffLoopState(before_path=str(before), after_path=str(after))
+    state.run_diff(gpu=0)
+
+    out_path = tmp_path / "diff.json"
+    warnings = state.set_decision(
+        "accept",
+        reason="candidate is faster",
+        write_path=str(out_path),
+        decider="tester@example.com",
+        decided_at="2026-06-18T00:00:00Z",
+    )
+    assert isinstance(warnings, list)
+    assert out_path.exists()
+    assert state.decision == "accept"
+    assert state.decision_path == str(out_path)
+    assert state.phase == "accept"
+
+    record = json.loads(out_path.read_text(encoding="utf-8"))
+    assert record["decision"]["status"] == "accepted"
+    assert record["decision"]["reason"] == "candidate is faster"
+    assert record["decision"]["decider"] == "tester@example.com"
+    assert record["decision"]["decided_at"] == "2026-06-18T00:00:00Z"
+
+    # Byte-shape identical to what the CLI writer produces for the same summary.
+    from nsys_ai.diff_decision import build_diff_decision_record
+
+    expected_payload, _ = build_diff_decision_record(
+        state.diff_summary_obj,
+        decision="accepted",
+        reason="candidate is faster",
+        decider="tester@example.com",
+        decided_at="2026-06-18T00:00:00Z",
+    )
+    expected_text = json.dumps(expected_payload, indent=2, sort_keys=True) + "\n"
+    assert out_path.read_text(encoding="utf-8") == expected_text
+
+
+def test_set_decision_persists_across_reload(minimal_nsys_db_path, tmp_path):
+    before = Path(minimal_nsys_db_path)
+    after = tmp_path / "after.sqlite"
+    shutil.copy(before, after)
+
+    state = DiffLoopState(before_path=str(before), after_path=str(after))
+    state.run_diff(gpu=0)
+    out_path = tmp_path / "diff.json"
+    state.set_decision("reject", reason="too slow", write_path=str(out_path))
+
+    restored = DiffLoopState.from_dict(state.to_dict())
+    assert restored.decision == "reject"
+    assert restored.decision_reason == "too slow"
+    assert restored.decision_path == str(out_path)
+    # The on-disk audit record survives regardless of in-memory reload.
+    assert out_path.exists()
+
+
+def test_set_decision_empty_reason_leaves_state_unchanged(minimal_nsys_db_path, tmp_path):
+    before = Path(minimal_nsys_db_path)
+    after = tmp_path / "after.sqlite"
+    shutil.copy(before, after)
+
+    state = DiffLoopState(before_path=str(before), after_path=str(after))
+    state.run_diff(gpu=0)
+    out_path = tmp_path / "diff.json"
+
+    with pytest.raises(ValueError):
+        state.set_decision("accept", reason="   ", write_path=str(out_path))
+
+    assert state.decision is None
+    assert state.decision_path == ""
+    assert state.phase == "diff"
+    assert not out_path.exists()
+
+
+def test_set_decision_without_diff_records_but_writes_nothing(tmp_path):
+    state = DiffLoopState(before_path="/tmp/before.sqlite")
+    out_path = tmp_path / "diff.json"
+    warnings = state.set_decision("accept", reason="manual", write_path=str(out_path))
+    assert warnings == []
+    assert state.decision == "accept"
+    assert state.decision_reason == "manual"
+    assert state.decision_path == ""
+    assert not out_path.exists()
 
 
 def test_loop_state_run_diff(minimal_nsys_db_path, tmp_path):

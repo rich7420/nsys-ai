@@ -96,6 +96,7 @@ class _ThreadedHTTPServer(_ThreadPoolMixIn, socketserver.ThreadingMixIn, HTTPSer
 
 
 from .export import gpu_trace  # noqa: E402
+from .loop_state import DECISION_JSON_PATH  # noqa: E402
 from .viewer import (  # noqa: E402
     build_timeline_gpu_data,
     generate_evidence_html,
@@ -535,8 +536,13 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             decision = str(payload.get("decision") or "").strip()
             reason = str(payload.get("reason") or "").strip()
-            loop_state.set_decision(decision, reason=reason)
-            self._json_response(loop_state.to_dict())
+            warnings = loop_state.set_decision(
+                decision, reason=reason, write_path=DECISION_JSON_PATH
+            )
+            response = loop_state.to_dict()
+            if warnings:
+                response["decision_warnings"] = warnings
+            self._json_response(response)
 
     def _handle_loop_server_error(self, path: str, exc: Exception):
         _log.exception("Error handling POST %s", path)

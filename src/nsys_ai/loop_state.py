@@ -19,6 +19,9 @@ Scope = Literal["global", "gpu", "iteration", "region"]
 PHASES: tuple[Phase, ...] = ("diagnose", "propose", "reprofile", "diff", "accept")
 SEVERITY_WEIGHT = {"critical": 4, "warning": 3, "info": 2}
 
+# Auditable decision record path, matching the CLI's `diff --accept/--reject`.
+DECISION_JSON_PATH = "diff.json"
+
 
 def _phase_index(phase: str) -> int:
     try:
@@ -161,6 +164,7 @@ class DiffLoopState:
     expected_impact: str = ""
     decision: Decision | None = None
     decision_reason: str = ""
+    decision_path: str = ""
     diagnose_ran: bool = False
     diagnose_findings_count: int = 0
     top_findings: list[dict[str, Any]] = field(default_factory=list)
@@ -168,6 +172,10 @@ class DiffLoopState:
     comparability_confidence: float | None = None
     verdict: str = "neutral"
     last_error: str = ""
+    # Runtime handle to the ProfileDiffSummary produced by the most recent
+    # run_diff. Used to write the auditable diff.json decision record and
+    # deliberately excluded from to_dict/from_dict serialization.
+    diff_summary_obj: Any = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         preset = detect_h100_replay_preset()
@@ -182,6 +190,7 @@ class DiffLoopState:
             "expected_impact": self.expected_impact,
             "decision": self.decision,
             "decision_reason": self.decision_reason,
+            "decision_path": self.decision_path,
             "diagnose_ran": self.diagnose_ran,
             "diagnose_findings_count": self.diagnose_findings_count,
             "top_findings": self.top_findings,
@@ -202,6 +211,7 @@ class DiffLoopState:
             expected_impact=str(payload.get("expected_impact") or ""),
             decision=payload.get("decision"),
             decision_reason=str(payload.get("decision_reason") or ""),
+            decision_path=str(payload.get("decision_path") or ""),
             diagnose_ran=bool(payload.get("diagnose_ran")),
             diagnose_findings_count=int(payload.get("diagnose_findings_count") or 0),
             top_findings=list(payload.get("top_findings") or []),
@@ -312,6 +322,7 @@ class DiffLoopState:
                 )
         payload = json.loads(to_diff_json(summary))
         self.diff_summary = payload
+        self.diff_summary_obj = summary
         self.verdict = str(payload.get("verdict") or "neutral")
         confidence = payload.get("comparability_confidence")
         if isinstance(confidence, (int, float)):
@@ -320,10 +331,47 @@ class DiffLoopState:
         self.last_error = ""
         return payload
 
-    def set_decision(self, decision: Decision, reason: str = "") -> None:
+    def set_decision(
+        self,
+        decision: Decision,
+        reason: str = "",
+        *,
+        write_path: str | None = None,
+        decider: str | None = None,
+        decided_at: str | None = None,
+    ) -> list[str]:
+        """Record the accept/reject decision, optionally persisting diff.json.
+
+        When ``write_path`` is set and a diff summary is available (run_diff has
+        run), the decision is written through the shared writer so the file is
+        byte-shape-identical to the CLI's ``diff --accept/--reject`` output.
+        Returns any advisory warnings raised while building the record. The
+        on-disk write happens before in-memory state is mutated so a refused
+        record (e.g. missing reason) leaves the loop state unchanged.
+        """
         if decision not in ("accept", "reject"):
             raise ValueError("decision must be 'accept' or 'reject'")
+
+        normalized_reason = (reason or "").strip()
+        warnings: list[str] = []
+        decision_path = ""
+        if write_path and self.diff_summary_obj is not None:
+            from .diff_decision import write_diff_decision_json
+
+            record_status = "accepted" if decision == "accept" else "rejected"
+            out_path, _, warnings = write_diff_decision_json(
+                self.diff_summary_obj,
+                decision=record_status,
+                reason=normalized_reason,
+                path=write_path,
+                decider=decider,
+                decided_at=decided_at,
+            )
+            decision_path = str(out_path)
+
         self.decision = decision
-        self.decision_reason = (reason or "").strip()
+        self.decision_reason = normalized_reason
+        self.decision_path = decision_path
         self.phase = "accept"
         self.last_error = ""
+        return warnings
