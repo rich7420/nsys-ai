@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 import threading
 import time
 from dataclasses import FrozenInstanceError
@@ -90,11 +91,8 @@ if sys.argv[1] == 'profile':
         output.with_suffix('.child.pid').write_text(str(child.pid))
         time.sleep(0.1)
         sys.exit(17)
-    if mode == 'exit_094':
-        time.sleep(0.94)
-        sys.exit(17)
-    if mode == 'exit_070':
-        time.sleep(0.70)
+    if mode == 'exit_before_deadline':
+        time.sleep(0.5)
         sys.exit(17)
     if mode == 'env':
         ok = (
@@ -607,11 +605,82 @@ def test_capturing_callback_cancellation_prevents_popen(
 
 
 def _process_is_running(pid):
-    try:
-        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
-    except (FileNotFoundError, ProcessLookupError):
-        return False
-    return state != "Z"
+    """True when *pid* names a live, non-zombie process.
+
+    /proc is Linux-only. On macOS every lookup raised FileNotFoundError and this
+    returned False unconditionally, so every ``assert not
+    _process_is_running(...)`` below held without observing anything: the
+    process-tree teardown these tests exist to check was not being checked at
+    all on this platform, and they still read green.
+
+    ``ps -o state=`` answers the same question everywhere -- empty output for a
+    pid that is gone, a leading "Z" for one that has exited but not been
+    reaped.
+    """
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            return proc_stat.read_text().split()[2] != "Z"
+        except (FileNotFoundError, ProcessLookupError, IndexError):
+            return False
+    probe = subprocess.run(
+        ["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True
+    )
+    state = probe.stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _child_pid(tmp_path, timeout=15):
+    """The grandchild's pid, once the fake profiler has recorded it.
+
+    Read eagerly, this raced the fake profiler: it has to start a Python
+    interpreter and then start another one for the child before the file
+    exists, which on a loaded machine takes longer than the fixed delays these
+    tests used to wait. The test then failed reading a file that was never
+    written, which says nothing about the teardown being tested.
+    """
+    path = Path(tmp_path) / "artifacts" / "profile.child.pid"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            text = path.read_text().strip()
+        except (FileNotFoundError, NotADirectoryError):
+            text = ""
+        if text:
+            return int(text)
+        time.sleep(0.01)
+    raise AssertionError(f"{path} was never written; the fake profiler did not start a child")
+
+
+def _trip_once_child_exists(tmp_path, event, timeout=15):
+    """Trip *event* as soon as the grandchild exists, rather than after a guess.
+
+    A fixed timer was racing two interpreter startups: cancellation regularly
+    arrived before there was any process tree to tear down. Keying off the
+    event the test is actually about removes the race without weakening it --
+    the fake profiler writes the pid and only then begins the window this is
+    meant to land inside.
+    """
+    path = Path(tmp_path) / "artifacts" / "profile.child.pid"
+
+    def _wait():
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                break
+            time.sleep(0.01)
+        event.set()
+
+    thread = threading.Thread(target=_wait, daemon=True)
+    thread.start()
+    return thread
+
+
+def _assert_process_exits(pid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while _process_is_running(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not _process_is_running(pid), f"pid {pid} survived teardown"
 
 
 @pytest.mark.parametrize("stop_kind", ["timeout", "cancel"])
@@ -622,7 +691,7 @@ def test_timeout_and_cancellation_kill_the_process_tree(
     cancellation = threading.Event()
     timeout = 1 if stop_kind == "timeout" else None
     if stop_kind == "cancel":
-        threading.Timer(0.15, cancellation.set).start()
+        _trip_once_child_exists(tmp_path, cancellation)
     runner = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys))
 
     result = runner.run(
@@ -632,11 +701,7 @@ def test_timeout_and_cancellation_kill_the_process_tree(
 
     expected = RunStatus.TIMED_OUT if stop_kind == "timeout" else RunStatus.CANCELLED
     assert result.status is expected
-    child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
-    deadline = time.monotonic() + 2
-    while _process_is_running(child_pid) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert not _process_is_running(child_pid)
+    _assert_process_exits(_child_pid(tmp_path))
 
 
 def test_due_cancellation_beats_leader_exit_and_kills_surviving_child(
@@ -645,18 +710,14 @@ def test_due_cancellation_beats_leader_exit_and_kills_surviving_child(
     monkeypatch.setattr("nsys_ai.profile_runner._POLL_SECONDS", 0.25)
     monkeypatch.setattr("nsys_ai.profile_runner._TERMINATION_GRACE_SECONDS", 0.1)
     cancellation = threading.Event()
-    threading.Timer(0.08, cancellation.set).start()
+    _trip_once_child_exists(tmp_path, cancellation)
 
     result = LocalProfileRunner(tmp_path / "artifacts", str(fake_nsys)).run(
         _spec("race_cancel"), cancellation=cancellation
     )
 
     assert result.status is RunStatus.CANCELLED
-    child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
-    deadline = time.monotonic() + 2
-    while _process_is_running(child_pid) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert not _process_is_running(child_pid)
+    _assert_process_exits(_child_pid(tmp_path))
 
 
 def test_leader_exit_always_cleans_surviving_process_group(
@@ -668,20 +729,28 @@ def test_leader_exit_always_cleans_surviving_process_group(
 
     assert result.status is RunStatus.NSYS_FAILED
     assert result.nsys_return_code == 17
-    child_pid = int((tmp_path / "artifacts" / "profile.child.pid").read_text())
-    deadline = time.monotonic() + 2
-    while _process_is_running(child_pid) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert not _process_is_running(child_pid)
+    _assert_process_exits(_child_pid(tmp_path))
 
 
-@pytest.mark.parametrize(
-    ("mode", "poll_seconds"),
-    [("exit_094", 2.0), ("exit_070", 5.0)],
-)
+#: The deadline has to clear the fake profiler's sleep by more than the time it
+#: takes to start. The old pairing slept 0.94s against a 1s timeout -- a 60ms
+#: margin that also had to absorb two Python interpreter startups, so on a
+#: loaded machine the run genuinely timed out and the test read TIMED_OUT. The
+#: margin is now a second, which no startup approaches, and the assertion is
+#: unchanged: the deadline still falls well before the poll interval, so a
+#: runner that waited for the next poll instead of noticing the exit would still
+#: time out and fail this.
+#:
+#: RunSpec requires a whole number of seconds, so the margin is bought by
+#: raising the deadline rather than by shaving the sleep, and the poll intervals
+#: move with it to stay clear of the deadline.
+_COMPLETION_TIMEOUT_SECONDS = 2
+
+
+@pytest.mark.parametrize("poll_seconds", [3.0, 6.0])
 @pytest.mark.no_cover
 def test_completion_before_deadline_wins_over_coarse_polling(
-    tmp_path, fake_nsys, monkeypatch, mode, poll_seconds
+    tmp_path, fake_nsys, monkeypatch, poll_seconds
 ):
     # Coverage tracing is deliberately excluded here. This test verifies a
     # sub-second process/deadline race, and tracing both this test and the fake
@@ -692,7 +761,12 @@ def test_completion_before_deadline_wins_over_coarse_polling(
     monkeypatch.delenv("COVERAGE_SOURCE", raising=False)
     monkeypatch.setattr("nsys_ai.profile_runner._POLL_SECONDS", poll_seconds)
 
-    result = _run(tmp_path, fake_nsys, mode, timeout_seconds=1)
+    result = _run(
+        tmp_path,
+        fake_nsys,
+        "exit_before_deadline",
+        timeout_seconds=_COMPLETION_TIMEOUT_SECONDS,
+    )
 
     assert result.status is RunStatus.NSYS_FAILED
     assert result.nsys_return_code == 17
@@ -725,11 +799,7 @@ def test_cancellation_callable_failure_propagates_after_process_tree_cleanup(
             _spec("hang"), cancellation=broken_cancellation
         )
 
-    child_pid = int(pid_path.read_text())
-    deadline = time.monotonic() + 2
-    while _process_is_running(child_pid) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert not _process_is_running(child_pid)
+    _assert_process_exits(_child_pid(tmp_path))
 
 
 def test_keyboard_interrupt_from_cancellation_cleans_process_tree(
@@ -748,11 +818,7 @@ def test_keyboard_interrupt_from_cancellation_cleans_process_tree(
             _spec("hang"), cancellation=interrupted_cancellation
         )
 
-    child_pid = int(pid_path.read_text())
-    deadline = time.monotonic() + 2
-    while _process_is_running(child_pid) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert not _process_is_running(child_pid)
+    _assert_process_exits(_child_pid(tmp_path))
 
 
 def test_progress_model_is_frozen():
