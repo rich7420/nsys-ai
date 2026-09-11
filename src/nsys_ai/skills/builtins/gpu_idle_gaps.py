@@ -45,12 +45,61 @@ def _classify_gap_apis(api_names: list[str]) -> tuple[str, str]:
     return "unknown", "Unclassified CUDA API activity"
 
 
+def _copy_wall_ms(adapter, memcpy_tbl, trim_clause, params) -> float | None:
+    """Wall time on *device* during which at least one copy was in flight.
+
+    Not a subset of idle: a copy can run alongside a kernel, so this can exceed
+    the idle figure it sits beside. It answers "was the GPU moving data", which
+    is the question the idle number cannot.
+
+    The union, not the sum: copies on different streams overlap, and a sum would
+    claim more wall time than the window holds. None when the profile carries no
+    memcpy table, which is not the same as zero copying.
+
+    This exists because "idle" here means "no kernel running", and a reader takes
+    it to mean "the GPU had nothing to do". A window spent moving 253 MB is
+    neither of those, and the two have different fixes -- a stalled input
+    pipeline versus a transfer that wants overlapping or shrinking.
+    """
+    if not memcpy_tbl:
+        return None
+    try:
+        rows = adapter.execute(
+            f'SELECT m.start, m."end" FROM {memcpy_tbl} m '  # nosec B608
+            f"WHERE m.deviceId = ? {trim_clause.replace('k.', 'm.')} "
+            f"ORDER BY m.start",
+            params,
+        ).fetchall()
+    except DB_ERRORS:
+        return None
+    if not rows:
+        return 0.0
+
+    total_ns = 0
+    span_start, span_end = None, None
+    for start, end in rows:
+        if start is None or end is None or end <= start:
+            continue
+        if span_start is None:
+            span_start, span_end = int(start), int(end)
+            continue
+        if int(start) > span_end:
+            total_ns += span_end - span_start
+            span_start, span_end = int(start), int(end)
+        else:
+            span_end = max(span_end, int(end))
+    if span_start is not None:
+        total_ns += span_end - span_start
+    return round(total_ns / 1e6, 2)
+
+
 def _execute(conn: sqlite3.Connection, **kwargs):
     """Execute GPU idle gaps analysis with aggregation and CPU attribution."""
     adapter = wrap_connection(conn)
     tables = adapter.resolve_activity_tables()
     kernel_tbl = tables.get("kernel")
     runtime_tbl = tables.get("runtime")
+    memcpy_tbl = tables.get("memcpy")
     if not kernel_tbl:
         return []
 
@@ -217,6 +266,10 @@ WHERE prev_end IS NOT NULL AND (start - prev_end) > ?"""
         "gap_count": agg.get("gap_count") or 0,
         "total_idle_ms": round(total_gap_ns / 1e6, 2),
         "device_idle_ms": round(device_idle_ms, 2) if device_idle_ms is not None else None,
+        # How much of that "idle" was the GPU moving data. Idle here counts the
+        # absence of a kernel, so a copy-filled window reads as doing nothing.
+        # None means the profile carries no memcpy table, which is not zero.
+        "copy_ms": _copy_wall_ms(adapter, memcpy_tbl, trim_clause, list(trim_params)),
         "pct_of_profile": pct_of_profile,
         "gaps_1_5ms": agg.get("gaps_1_5ms") or 0,
         "gaps_5_50ms": agg.get("gaps_5_50ms") or 0,
@@ -291,6 +344,15 @@ def _format(rows):
         # wall-clock lost, so show what the device itself idled when known.
         if summary.get("device_idle_ms") is not None:
             lines.append(f"  Device-level idle: {summary['device_idle_ms']:.1f}ms")
+        # Idle here counts the absence of a kernel, so a window spent moving data
+        # reads as doing nothing. Naming the copy time separately is what lets a
+        # reader tell a stalled input pipeline from a transfer worth overlapping.
+        copy_ms = summary.get("copy_ms")
+        if copy_ms:
+            lines.append(
+                f"  GPU copying:       {copy_ms:.1f}ms — idle above counts kernel "
+                f"absence, so copy time is inside it"
+            )
         lines.append(
             f"  Distribution: "
             f"{summary['gaps_1_5ms']} × 1-5ms, "
