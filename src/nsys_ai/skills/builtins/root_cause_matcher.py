@@ -791,6 +791,19 @@ _PHASE_LABEL_HINTS = (
 )
 
 
+#: A pipeline partitions a model into a few stages: real pipeline-parallel
+#: degrees are single digits, occasionally up to 32. Hundreds of regions are an
+#: annotation of operations or layers, and a recommendation to repartition a
+#: pipeline is not supported by them.
+_MAX_PLAUSIBLE_STAGES = 32
+
+#: The spread has to be worth acting on in absolute terms, not only as a ratio.
+#: The sole gate was ``compute_ms > 0.01`` (10us), so a 0.3ms-against-0.1ms
+#: difference between two trivially small operations cleared the 3x ratio and
+#: was reported as actionable.
+_MIN_IMBALANCE_SPREAD_MS = 1.0
+
+
 def _regions_look_like_repeated_peers(layers: list[dict]) -> bool:
     """True when the regions plausibly name stages of one pipeline.
 
@@ -821,7 +834,34 @@ def _regions_look_like_repeated_peers(layers: list[dict]) -> bool:
     )
     # Any phase label among them is enough: a pipeline's stages are not named
     # "backward", and a mix means the set is not a clean list of peers either.
-    return phase_like == 0
+    if phase_like:
+        return False
+
+    # Reading only the labels made this a denylist, and a denylist fails open:
+    # any annotation style that is not PyTorch's phase naming was taken for a
+    # pipeline by default. On this repository's own fixture that meant 132
+    # regions named "aten::linear, op_id = NNNNNN" -- individual operations --
+    # drew a warning to repartition a pipeline the run may not have.
+    #
+    # Note what is deliberately *not* used to detect that: collapsing trailing
+    # digits would fold "aten::linear, op_id = 1..132" into one name, but it
+    # would equally fold a real "stage_0..stage_7" pipeline into one, rejecting
+    # the very case this is meant to keep.
+    if len(layers) > _MAX_PLAUSIBLE_STAGES:
+        return False
+
+    # A stage spans many kernels; a region wrapping a single kernel is one
+    # operation. Absence of the field is not evidence either way -- callers
+    # legitimately pass rows without it -- so only measured counts vote.
+    measured = [
+        int(count)
+        for count in (r.get("kernel_count") for r in layers)
+        if isinstance(count, (int, float)) and not isinstance(count, bool)
+    ]
+    if measured and sum(1 for c in measured if c <= 1) * 2 > len(measured):
+        return False
+
+    return True
 
 
 def _check_pipeline_imbalance(layer_data: list[dict], threshold_ratio: float = 3.0) -> list[dict]:
@@ -845,6 +885,10 @@ def _check_pipeline_imbalance(layer_data: list[dict], threshold_ratio: float = 3
     ratio = max_compute / min_compute if min_compute > 0 else 0
 
     if ratio < threshold_ratio:
+        return []
+
+    # A ratio with no absolute floor fires on noise.
+    if max_compute - min_compute < _MIN_IMBALANCE_SPREAD_MS:
         return []
 
     # Find the heaviest and lightest layers
