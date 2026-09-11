@@ -152,3 +152,25 @@ def test_a_single_phase_label_is_enough_to_withhold_the_claim():
     ])
 
     assert findings[0]["pattern"] == "Uneven NVTX Regions"
+
+
+def test_nesting_does_not_change_the_verdict():
+    """nvtx_layer_breakdown returns full paths, so ancestors are in the label.
+
+    Sibling stages under a 'train_step' parent all carry "step" in their path
+    and were read as phases — the warning suppressed because an enclosing
+    annotation existed, which is the opposite of what that annotation says.
+    """
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    nested_stages = [
+        {"nvtx_path": f"train_step > stage_{i}", "compute_ms": ms}
+        for i, ms in enumerate([240.0, 80.0, 75.0, 20.0])
+    ]
+    nested_phases = [
+        {"nvtx_path": f"iteration > {name}", "compute_ms": ms}
+        for name, ms in [("forward", 120.0), ("backward", 240.0), ("data_load", 2.0)]
+    ]
+
+    assert _check_pipeline_imbalance(nested_stages)[0]["pattern"] == "Pipeline Imbalance"
+    assert _check_pipeline_imbalance(nested_phases)[0]["pattern"] == "Uneven NVTX Regions"

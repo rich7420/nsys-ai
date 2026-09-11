@@ -804,8 +804,17 @@ def _regions_look_like_repeated_peers(layers: list[dict]) -> bool:
     that profile -- a recommendation to rebalance -- so the cost of a miss is the
     status quo, not a new failure.
     """
+    # The region's own label, not its ancestry. nvtx_layer_breakdown returns
+    # full hierarchical paths, so sibling stages nested under a "train_step"
+    # parent all carry "step" in their path and were read as phases -- the
+    # warning was suppressed because an enclosing annotation existed, which is
+    # the opposite of what the enclosing annotation tells you.
     labels = [
-        str(r.get("nvtx_path") or r.get("nvtx_region") or "").lower() for r in layers
+        str(r.get("nvtx_path") or r.get("nvtx_region") or "")
+        .rsplit(">", 1)[-1]
+        .strip()
+        .lower()
+        for r in layers
     ]
     phase_like = sum(
         1 for label in labels if any(hint in label for hint in _PHASE_LABEL_HINTS)
