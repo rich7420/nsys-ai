@@ -44,9 +44,10 @@ ORDER BY total_ms DESC, copyKind ASC""",
 )
 
 
-#: A window shorter than this has no distribution to classify: with two buckets
-#: any "leading portion" is most of the window.
-_MIN_BUCKETS_FOR_SHAPE = 3
+#: A window shorter than this has no distribution to classify: across two
+#: seconds any "leading portion" is most of the window. Measured in elapsed
+#: seconds, not in buckets that happen to carry a transfer.
+_MIN_SECONDS_FOR_SHAPE = 3
 
 #: The leading share of the window that "front-loaded" means. A fraction rather
 #: than a fixed duration, so the same transfer pattern gets the same verdict in a
@@ -68,31 +69,41 @@ def _classify_h2d_pattern(rows: list, kwargs: dict | None = None) -> dict:
     # ratio below is 1.0 by construction and init_heavy wins whatever the data
     # says, so steady per-batch loading in a sub-2s trim was reported as normal
     # weight loading -- the one verdict that tells a reader to stop looking.
-    if len(rows) < _MIN_BUCKETS_FOR_SHAPE:
+    # Elapsed seconds, not row count. The query returns only the seconds that
+    # carried a transfer, so len(rows) is how many buckets have data and says
+    # nothing about how long the window is. Slicing by position then took "the
+    # first quarter of six rows" on buckets [0, 50, 51, 52, 53, 54] and called a
+    # 900 MB spike at second 50 front-loading -- reported, absurdly, as "the
+    # first 51 seconds of a 6-second window" -- which also swallowed the spike
+    # finding that root_cause_matcher consumes.
+    first_second = min(r["second"] for r in rows)
+    last_second = max(r["second"] for r in rows)
+    window_seconds = last_second - first_second + 1
+
+    if window_seconds < _MIN_SECONDS_FOR_SHAPE:
         return {
             "_pattern": True,
             "type": "undetermined",
             "detail": (
-                f"Window covers {len(rows)} second-bucket(s); at least "
-                f"{_MIN_BUCKETS_FOR_SHAPE} are needed to tell a front-loaded "
+                f"Window spans {window_seconds} second-bucket(s); at least "
+                f"{_MIN_SECONDS_FOR_SHAPE} are needed to tell a front-loaded "
                 f"distribution from a steady one. Widen --trim to classify."
             ),
         }
 
     # Init-heavy: the leading portion of the window accounts for >80% of bytes.
-    # Measured as a fraction of the window rather than a fixed two seconds, so
+    # Measured as a fraction of elapsed time rather than a fixed two seconds, so
     # the verdict describes the distribution instead of the window length.
-    lead_buckets = max(1, round(len(rows) * _INIT_LEAD_FRACTION))
-    ordered = sorted(rows, key=lambda r: r["second"])
-    lead_mb = sum(r["total_mb"] for r in ordered[:lead_buckets])
+    lead_seconds = max(1, round(window_seconds * _INIT_LEAD_FRACTION))
+    lead_cutoff = first_second + lead_seconds
+    lead_mb = sum(r["total_mb"] for r in rows if r["second"] < lead_cutoff)
     if lead_mb / total_mb > 0.8:
-        lead_seconds = ordered[lead_buckets - 1]["second"] + 1
         return {
             "_pattern": True,
             "type": "init_heavy",
             "detail": (
                 f"H2D concentrated in the first {lead_seconds} second(s) of a "
-                f"{len(rows)}-second window "
+                f"{window_seconds}-second window "
                 f"({lead_mb:.1f}/{total_mb:.1f} MB = "
                 f"{100 * lead_mb / total_mb:.0f}%). "
                 f"Likely model weight loading — normal behavior."

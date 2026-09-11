@@ -1336,3 +1336,34 @@ def test_h2d_front_loading_is_still_recognised():
 
     assert _classify_h2d_pattern(short)["type"] == "init_heavy"
     assert _classify_h2d_pattern(long)["type"] == "init_heavy"
+
+
+def test_h2d_sparse_buckets_do_not_swallow_a_late_spike():
+    """The query returns only seconds that carried a transfer.
+
+    len(rows) is therefore how many buckets have data, not how long the window
+    is. Slicing by position took "the first quarter of six rows" on buckets
+    [0, 50, 51, 52, 53, 54] and called a 900 MB spike at second 50 front-loading
+    — announced as "the first 51 seconds of a 6-second window" — which also
+    swallowed the spike finding root_cause_matcher consumes.
+    """
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    sparse = [
+        {"second": s, "total_mb": mb}
+        for s, mb in [(0, 1.0), (50, 900.0), (51, 1.0), (52, 1.0), (53, 1.0), (54, 1.0)]
+    ]
+
+    assert _classify_h2d_pattern(sparse)["type"] == "spike"
+
+
+def test_h2d_the_window_is_measured_in_elapsed_seconds():
+    """Two elapsed seconds have no shape, however many buckets carry data."""
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    result = _classify_h2d_pattern(
+        [{"second": 0, "total_mb": 100.0}, {"second": 1, "total_mb": 100.0}]
+    )
+
+    assert result["type"] == "undetermined"
+    assert "spans 2 second-bucket(s)" in result["detail"]
