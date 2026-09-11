@@ -370,7 +370,8 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                         ),
                         "recommendation": (
                             "Use pin_memory=True in DataLoader, keep "
-                            "model params on GPU, accumulate metrics on GPU."
+                            "model params on GPU, accumulate metrics on GPU. "
+                            "pin_memory only pays alongside prefetching or a copy stream; on its own it moves the copy cost rather than removing it."
                         ),
                     }
                 )
@@ -390,8 +391,11 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                             "detail", "H2D transfers detected in every step"
                         ),
                         "recommendation": (
-                            "Use pin_memory=True in DataLoader, increase num_workers, "
-                            "set prefetch_factor>=2, and ensure tensors are pre-staged on GPU. "
+                            "Use pin_memory=True in DataLoader together with "
+                            "increased num_workers and prefetch_factor>=2 — the pinning is "
+                            "what lets the copy be asynchronous, the prefetching is what "
+                            "gives it something to overlap with, and pinning alone moves the "
+                            "cost rather than removing it. Ensure tensors are pre-staged on GPU. "
                             "Check if .cpu() / .item() calls in the loop are pulling data back to host."
                         ),
                     }
@@ -1007,6 +1011,7 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
                 "recommendation": (
                     "Replace cudaMemcpy with cudaMemcpyAsync + pinned memory. "
                     "Use pin_memory=True in DataLoader and non_blocking=True in .to(device). "
+                    "Pinning only pays where the copy can overlap compute — a prefetching DataLoader, a separate copy stream, or non_blocking=True with work between the copy and its first use. Applied alone it makes the copy asynchronous and then waits on it anyway, moving the cost rather than removing it. "
                     "Run `nsys recipe cuda_memcpy_sync <profile.nsys-rep>` for a detailed breakdown."
                 ),
             }
@@ -1062,7 +1067,7 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
                 ),
                 "recommendation": (
                     "Use pinned (page-locked) memory: cudaMallocHost() / "
-                    "pin_memory=True in DataLoader. This enables true async H2D overlap. "
+                    "pin_memory=True in DataLoader. Pinning only pays where the copy can overlap compute — a prefetching DataLoader, a separate copy stream, or non_blocking=True with work between the copy and its first use. Applied alone it makes the copy asynchronous and then waits on it anyway, moving the cost rather than removing it. "
                     "Run `nsys recipe cuda_memcpy_async <profile.nsys-rep>` for details on pageable fallback."
                 ),
             }

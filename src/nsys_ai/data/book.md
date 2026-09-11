@@ -93,7 +93,10 @@ nsys-ai skill run memory_transfers profile.sqlite
 H2D total time > 5% of iteration time is concerning.
 
 **How to fix:**
-- Use `pin_memory=True` in DataLoader for async H2D
+- Use `pin_memory=True` in DataLoader for async H2D — asynchronous is not the
+  same as overlapped: without prefetching or a copy stream to overlap with, the
+  copy is issued asynchronously and then waited on, moving the cost rather than
+  removing it
 - Keep all model parameters on GPU (check for accidental CPU tensors)
 - Accumulate metrics on GPU, sync to CPU only at checkpoint time
 - Pre-allocate GPU buffers instead of re-creating tensors each iteration
