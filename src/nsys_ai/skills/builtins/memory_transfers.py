@@ -104,7 +104,7 @@ def _classify_h2d_pattern(rows: list, kwargs: dict | None = None) -> dict:
             "detail": (
                 f"H2D transfers spread across {len(rows)} seconds "
                 f"({total_mb:.1f} MB total). Every step has H2D — "
-                f"consider pin_memory=True and increasing DataLoader num_workers."
+                f"consider pin_memory=True with prefetching — pin_memory raises transfer bandwidth on its own, but hiding the transfer behind compute additionally needs a copy stream — DataLoader prefetching stages batches on the CPU and does not by itself overlap H2D with kernels."
             ),
         }
 
