@@ -247,9 +247,27 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 ),
             )
 
+            # The count and the total are different populations, and "N gaps
+            # ... totaling X" asserted they were one. The count is of gaps above
+            # the threshold; the total is device_idle_ms, which includes every
+            # gap below it. A single-stream profile with three 2ms gaps and a
+            # hundred 0.9ms ones therefore read "3 gaps > 1.0ms detected,
+            # totaling 96.0ms" -- inviting the reader to divide and conclude the
+            # average bubble was 32ms.
+            #
+            # len(large_gaps) was the wrong count for the same sentence anyway:
+            # it counts the detail rows, which gpu_idle_gaps truncates, so the
+            # fixture reported 20 of its actual 56. The summary carries the
+            # real number; fall back to the listed rows only when it does not,
+            # and never let the fallback claim more than it counted.
+            counted = gap_summary.get("gap_count") if gap_summary else None
+            if not isinstance(counted, int) or isinstance(counted, bool):
+                counted = len(large_gaps)
+            counted = max(counted, len(large_gaps))
+
             evidence = (
-                f"{len(large_gaps)} gaps > {gap_threshold / 1e6:.1f}ms detected, "
-                f"totaling {total_idle_ms:.1f}ms of idle time"
+                f"{counted} gaps > {gap_threshold / 1e6:.1f}ms detected; "
+                f"{total_idle_ms:.1f}ms total GPU idle"
             )
             if pct > 0:
                 evidence += f" ({pct}% of profile)"

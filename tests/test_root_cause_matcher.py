@@ -97,3 +97,68 @@ class TestIdlePercentageMatchesItsDuration:
 
         assert ms == 250.0
         assert pct == 0.0
+
+
+# ── The gap count and the idle total describe the same thing ────────────────
+
+
+class TestGapCountAndIdleTotalAgree:
+    """The evidence sentence used to pair two unrelated populations.
+
+    The count was of gaps above the threshold, the total was ``device_idle_ms``
+    -- every gap including those below it. Stated as "N gaps ... totaling X",
+    a reader divides and gets an average bubble that never occurred.
+    """
+
+    @staticmethod
+    def _evidence(summary, gap_rows):
+        import sqlite3
+        from unittest.mock import patch
+
+        from nsys_ai.skills.builtins import root_cause_matcher as rcm
+
+        def fake(name, conn, **kw):
+            if name == "gpu_idle_gaps":
+                return [summary, *gap_rows]
+            return []
+
+        with patch.object(rcm, "_safe_execute", side_effect=fake):
+            findings = rcm._execute(sqlite3.connect(":memory:"), _skip_device_validation=True)
+        return next(
+            (f["evidence"] for f in findings if f["pattern"] == "GPU Bubbles (Pipeline Stalls)"),
+            "",
+        )
+
+    def test_the_total_is_not_claimed_as_the_sum_of_the_counted_gaps(self):
+        """Three 2ms gaps beside a hundred 0.9ms ones: 6ms, not 96ms."""
+        summary = {
+            "_summary": True, "gap_count": 3, "device_idle_ms": 96.0,
+            "profile_start_ns": 0, "profile_end_ns": 100_000_000,
+        }
+        gaps = [{"gap_ns": 2_000_000, "attribution": {}} for _ in range(3)]
+
+        evidence = self._evidence(summary, gaps)
+
+        assert "totaling 96.0ms" not in evidence, evidence
+        assert "96.0ms total GPU idle" in evidence, evidence
+
+    def test_the_count_comes_from_the_summary_not_the_truncated_rows(self):
+        """gpu_idle_gaps truncates its detail rows; the summary counts them all."""
+        summary = {
+            "_summary": True, "gap_count": 56, "device_idle_ms": 938.1,
+            "profile_start_ns": 0, "profile_end_ns": 960_000_000,
+        }
+        gaps = [{"gap_ns": 5_000_000, "attribution": {}} for _ in range(20)]
+
+        evidence = self._evidence(summary, gaps)
+
+        assert evidence.startswith("56 gaps"), evidence
+
+    def test_a_summary_without_a_count_falls_back_to_the_listed_gaps(self):
+        summary = {
+            "_summary": True, "device_idle_ms": 50.0,
+            "profile_start_ns": 0, "profile_end_ns": 100_000_000,
+        }
+        gaps = [{"gap_ns": 5_000_000, "attribution": {}} for _ in range(4)]
+
+        assert self._evidence(summary, gaps).startswith("4 gaps")
