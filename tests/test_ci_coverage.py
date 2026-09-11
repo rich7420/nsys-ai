@@ -13,6 +13,7 @@ a new reason means something started skipping that did not before, which is the
 event worth catching.
 """
 
+import os
 import sqlite3
 import subprocess
 import sys
@@ -55,12 +56,28 @@ ACCEPTED_SKIP_REASONS = (
 
 def _collect_skip_reasons() -> list[str]:
     """Run the suite and return each distinct skip reason."""
+    # The subprocess has to see a profile. Without one the profile-backed tests
+    # skip with "No test profile" -- a reason deliberately kept out of
+    # ACCEPTED_SKIP_REASONS by the test below it -- so this guard failed on any
+    # tree where the variable was not exported. That is the ordinary local
+    # state, and running this file on its own is what the contributing
+    # instructions ask for, so the documented gate was red on an unmodified
+    # checkout. A gate that is red by default gets ignored, and this is the one
+    # whose whole purpose is noticing a file going dark.
+    #
+    # CI sets the variable at job level for this same reason. The fixture is
+    # committed and its path is already known here, so default to it rather
+    # than depend on the ambient environment.
+    env = dict(os.environ)
+    if not env.get("NSYS_TEST_PROFILE") and REAL_FIXTURE.is_file():
+        env["NSYS_TEST_PROFILE"] = str(REAL_FIXTURE)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "-q", "-rs", "-p", "no:cacheprovider",
          "--ignore=tests/test_ci_coverage.py"],
         cwd=REPO,
         capture_output=True,
         text=True,
+        env=env,
     )
     reasons = []
     for line in result.stdout.splitlines():
@@ -176,6 +193,30 @@ def test_the_integration_tests_are_no_longer_gated_out_of_ci():
     than quietly returning to the old state.
     """
     assert "No test profile" not in ACCEPTED_SKIP_REASONS
+
+
+def test_ci_hands_the_suite_the_committed_profile():
+    """Defaulting the variable above costs a detection; this restores it.
+
+    While the skip check depended on the ambient environment, a workflow that
+    dropped NSYS_TEST_PROFILE showed up here as "No test profile". Now that the
+    check supplies its own, it stays green whatever the workflow does -- which
+    is what makes the local gate usable, but would let CI's main run lose the
+    variable and silently skip every profile-backed test, the exact regression
+    test_the_integration_tests_are_no_longer_gated_out_of_ci exists to prevent.
+
+    So assert the workflow still hands it over.
+    """
+    ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+
+    assert "NSYS_TEST_PROFILE:" in ci, (
+        "ci.yml no longer sets NSYS_TEST_PROFILE, so the profile-backed tests "
+        "skip in CI and the build stays green while covering less."
+    )
+    assert REAL_FIXTURE.name in ci, (
+        f"ci.yml sets NSYS_TEST_PROFILE but not to {REAL_FIXTURE.name}; the "
+        "committed fixture is what makes those tests run in CI."
+    )
 
 
 def test_the_trajectory_suite_is_known_to_run_nowhere():
