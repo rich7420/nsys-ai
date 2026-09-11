@@ -174,3 +174,68 @@ def test_nesting_does_not_change_the_verdict():
 
     assert _check_pipeline_imbalance(nested_stages)[0]["pattern"] == "Pipeline Imbalance"
     assert _check_pipeline_imbalance(nested_phases)[0]["pattern"] == "Uneven NVTX Regions"
+
+
+# ── The claim needs positive evidence, and the spread needs a magnitude ──────
+
+
+def test_per_operation_annotations_are_not_a_pipeline():
+    """132 'aten::linear, op_id = N' regions are operations, not stages.
+
+    The label check was a denylist, so anything that was not PyTorch phase
+    naming defaulted to "pipeline stage". This is the repository's own fixture:
+    every region wraps exactly one kernel, which is what an operation looks like
+    and what a stage never does.
+    """
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    regions = [
+        {"nvtx_path": f"aten::linear, op_id = {318000 + i}", "kernel_count": 1,
+         "compute_ms": 40.0 if i == 0 else 4.0}
+        for i in range(132)
+    ]
+
+    findings = _check_pipeline_imbalance(regions)
+
+    assert findings[0]["pattern"] == "Uneven NVTX Regions"
+    assert findings[0]["severity"] == "info"
+
+
+def test_a_sub_millisecond_spread_is_not_reported_at_all():
+    """0.3ms against 0.1ms clears a 3x ratio and is still noise.
+
+    The only floor was compute_ms > 10us, so the fixture reported a 4.4x
+    "Pipeline Imbalance" between two operations whose entire difference was
+    0.2ms.
+    """
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    assert _check_pipeline_imbalance([
+        {"nvtx_region": "stage_0", "compute_ms": 0.31},
+        {"nvtx_region": "stage_1", "compute_ms": 0.07},
+    ]) == []
+
+
+def test_a_real_pipeline_survives_both_new_guards():
+    """The complement: few stages, each spanning many kernels, a real spread."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    findings = _check_pipeline_imbalance([
+        {"nvtx_region": f"stage_{i}", "kernel_count": 400, "compute_ms": ms}
+        for i, ms in enumerate([240.0, 80.0, 75.0, 20.0])
+    ])
+
+    assert findings[0]["pattern"] == "Pipeline Imbalance"
+    assert findings[0]["severity"] == "warning"
+
+
+def test_a_missing_kernel_count_is_not_read_as_evidence():
+    """Absence is not a single-kernel region; callers pass rows without it."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    findings = _check_pipeline_imbalance([
+        {"nvtx_region": f"stage_{i}", "compute_ms": ms}
+        for i, ms in enumerate([240.0, 80.0, 75.0, 20.0])
+    ])
+
+    assert findings[0]["pattern"] == "Pipeline Imbalance"
