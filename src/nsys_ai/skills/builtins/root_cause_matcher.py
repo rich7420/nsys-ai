@@ -371,7 +371,7 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                         "recommendation": (
                             "Use pin_memory=True in DataLoader, keep "
                             "model params on GPU, accumulate metrics on GPU. "
-                            "pin_memory only pays alongside prefetching or a copy stream; on its own it moves the copy cost rather than removing it."
+                            "pin_memory raises transfer bandwidth on its own, but hiding the transfer behind compute additionally needs a copy stream — DataLoader prefetching stages batches on the CPU and does not by itself overlap H2D with kernels."
                         ),
                     }
                 )
@@ -392,10 +392,12 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                         ),
                         "recommendation": (
                             "Use pin_memory=True in DataLoader together with "
-                            "increased num_workers and prefetch_factor>=2 — the pinning is "
-                            "what lets the copy be asynchronous, the prefetching is what "
-                            "gives it something to overlap with, and pinning alone moves the "
-                            "cost rather than removing it. Ensure tensors are pre-staged on GPU. "
+                            "increased num_workers and prefetch_factor>=2. These solve "
+                            "different halves: the workers keep CPU batches ready, the "
+                            "pinning removes the pageable staging copy. Overlapping the H2D "
+                            "with compute is a third thing and needs a copy stream — batches "
+                            "queued on the CPU do not overlap a transfer that shares the "
+                            "model's stream. Ensure tensors are pre-staged on GPU. "
                             "Check if .cpu() / .item() calls in the loop are pulling data back to host."
                         ),
                     }
@@ -1011,7 +1013,7 @@ def _check_sync_memcpy(conn: sqlite3.Connection, **kwargs):
                 "recommendation": (
                     "Replace cudaMemcpy with cudaMemcpyAsync + pinned memory. "
                     "Use pin_memory=True in DataLoader and non_blocking=True in .to(device). "
-                    "Pinning only pays where the copy can overlap compute — a prefetching DataLoader, a separate copy stream, or non_blocking=True with work between the copy and its first use. Applied alone it makes the copy asynchronous and then waits on it anyway, moving the cost rather than removing it. "
+                    "Pinning does two separable things. It raises transfer bandwidth by removing the pageable staging copy, which is worth having on its own for repeated transfers from a reused buffer. Hiding the transfer behind compute is the other, and needs more than pinning: a separate copy stream with events, or genuine concurrency between the copy and the work that follows it. Note that DataLoader num_workers/prefetch_factor prepare batches on the CPU — if the .to(device, non_blocking=True) and the model share one stream, the copy and the kernels still serialize. "
                     "Run `nsys recipe cuda_memcpy_sync <profile.nsys-rep>` for a detailed breakdown."
                 ),
             }
@@ -1067,7 +1069,7 @@ def _check_pageable_memcpy(conn: sqlite3.Connection, **kwargs):
                 ),
                 "recommendation": (
                     "Use pinned (page-locked) memory: cudaMallocHost() / "
-                    "pin_memory=True in DataLoader. Pinning only pays where the copy can overlap compute — a prefetching DataLoader, a separate copy stream, or non_blocking=True with work between the copy and its first use. Applied alone it makes the copy asynchronous and then waits on it anyway, moving the cost rather than removing it. "
+                    "pin_memory=True in DataLoader. Pinning does two separable things. It raises transfer bandwidth by removing the pageable staging copy, which is worth having on its own for repeated transfers from a reused buffer. Hiding the transfer behind compute is the other, and needs more than pinning: a separate copy stream with events, or genuine concurrency between the copy and the work that follows it. Note that DataLoader num_workers/prefetch_factor prepare batches on the CPU — if the .to(device, non_blocking=True) and the model share one stream, the copy and the kernels still serialize. "
                     "Run `nsys recipe cuda_memcpy_async <profile.nsys-rep>` for details on pageable fallback."
                 ),
             }

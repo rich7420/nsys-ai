@@ -336,7 +336,8 @@ _EXPLANATION = (
 _SUGGESTED_ACTIONS = [
     "Check for explicit cudaDeviceSynchronize / torch.cuda.synchronize calls in the call chain",
     "Verify the dataloader is keeping up (num_workers, prefetch_factor, and "
-    "pin_memory — which only pays alongside the other two)",
+    "pin_memory — the first two keep CPU batches ready, pinning speeds the "
+    "transfer itself, and overlapping it with compute needs a copy stream)",
     "Consider CUDA graphs if many tiny kernels precede the gap",
     "Check whether host-to-device transfers can be overlapped with compute",
 ]
