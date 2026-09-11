@@ -97,3 +97,58 @@ def test_matcher_reports_no_layer_findings_without_annotation(conn):
         assert "layer" not in str(f.get("pattern", "")).lower(), (
             f"layer-attributed cause on an unannotated profile: {f}"
         )
+
+
+# ── Pipeline Imbalance only claims a pipeline where one is plausible ────────
+
+
+def test_phase_annotations_are_not_reported_as_a_pipeline_to_rebalance():
+    """forward / backward / optimizer / data_load differ by design.
+
+    The check compared whatever nvtx_layer_breakdown returned and called the
+    spread "Pipeline Imbalance", recommending stage repartitioning — on a
+    single-GPU run that may have no pipeline parallelism at all. backward taking
+    120x data_load is what a healthy iteration looks like.
+    """
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    findings = _check_pipeline_imbalance([
+        {"nvtx_region": "forward", "compute_ms": 120.0},
+        {"nvtx_region": "backward", "compute_ms": 240.0},
+        {"nvtx_region": "optimizer", "compute_ms": 15.0},
+        {"nvtx_region": "data_load", "compute_ms": 2.0},
+    ])
+
+    assert len(findings) == 1
+    assert findings[0]["pattern"] == "Uneven NVTX Regions"
+    assert findings[0]["severity"] == "info"
+    assert "not necessarily pipeline stages" in findings[0]["recommendation"]
+    # The measurement is still reported; it is true and worth seeing.
+    assert "120.0×" in findings[0]["evidence"]
+
+
+def test_stage_like_regions_keep_the_rebalancing_advice():
+    """Where the regions do look like peers, the original finding stands."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    findings = _check_pipeline_imbalance([
+        {"nvtx_region": f"stage_{i}", "compute_ms": ms}
+        for i, ms in enumerate([240.0, 80.0, 75.0, 20.0])
+    ])
+
+    assert findings[0]["pattern"] == "Pipeline Imbalance"
+    assert findings[0]["severity"] == "warning"
+    assert "Rebalance pipeline stage partitioning" in findings[0]["recommendation"]
+
+
+def test_a_single_phase_label_is_enough_to_withhold_the_claim():
+    """A mixed set is not a clean list of peers either."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    findings = _check_pipeline_imbalance([
+        {"nvtx_region": "stage_0", "compute_ms": 240.0},
+        {"nvtx_region": "stage_1", "compute_ms": 80.0},
+        {"nvtx_region": "backward", "compute_ms": 20.0},
+    ])
+
+    assert findings[0]["pattern"] == "Uneven NVTX Regions"

@@ -773,6 +773,48 @@ def _first_measured(*values) -> float:
     return 0.0
 
 
+#: NVTX labels that name a phase of one iteration rather than a stage of a
+#: pipeline. Phases differ in cost by design, so a spread across them is not an
+#: imbalance to correct.
+_PHASE_LABEL_HINTS = (
+    "forward",
+    "backward",
+    "optimizer",
+    "optim",
+    "data",
+    "dataload",
+    "loss",
+    "zero_grad",
+    "step",
+    "eval",
+    "validation",
+)
+
+
+def _regions_look_like_repeated_peers(layers: list[dict]) -> bool:
+    """True when the regions plausibly name stages of one pipeline.
+
+    Deliberately conservative, and deliberately not clever. There is no field
+    saying what an NVTX annotation means, so this reads the only signal actually
+    present: a label that names a phase of an iteration is not a pipeline stage,
+    however uneven its cost. Anything else is left to the caller's existing
+    threshold.
+
+    Getting this wrong in the permissive direction restores the old behaviour for
+    that profile -- a recommendation to rebalance -- so the cost of a miss is the
+    status quo, not a new failure.
+    """
+    labels = [
+        str(r.get("nvtx_path") or r.get("nvtx_region") or "").lower() for r in layers
+    ]
+    phase_like = sum(
+        1 for label in labels if any(hint in label for hint in _PHASE_LABEL_HINTS)
+    )
+    # Any phase label among them is enough: a pipeline's stages are not named
+    # "backward", and a mix means the set is not a clean list of peers either.
+    return phase_like == 0
+
+
 def _check_pipeline_imbalance(layer_data: list[dict], threshold_ratio: float = 3.0) -> list[dict]:
     """Detect compute time imbalance across NVTX layers.
 
@@ -803,20 +845,47 @@ def _check_pipeline_imbalance(layer_data: list[dict], threshold_ratio: float = 3
     heaviest_label = heaviest.get("nvtx_path") or heaviest.get("nvtx_region", "?")
     lightest_label = lightest.get("nvtx_path") or lightest.get("nvtx_region", "?")
 
+    # What this compared were NVTX regions, which are whatever the annotator
+    # named. Only some captures annotate pipeline stages; the common PyTorch
+    # style is per-phase -- forward, backward, optimizer, data_load -- and those
+    # are *supposed* to differ. Reporting a 120x spread between 'backward' and
+    # 'data_load' as a pipeline to rebalance is a diagnosis the evidence does not
+    # support, on a run that may have no pipeline parallelism at all.
+    #
+    # Repetition is what separates the two: pipeline stages recur with similar
+    # shape across iterations, phases of one iteration do not. Where the regions
+    # do not look like repeated peers, the spread is still worth reporting -- it
+    # is true -- but as an observation about NVTX regions rather than as advice
+    # about partitioning.
+    looks_like_stages = _regions_look_like_repeated_peers(compute_layers)
+    if looks_like_stages:
+        recommendation = (
+            "Rebalance pipeline stage partitioning, "
+            "or investigate if the heavy layer has suboptimal kernel configuration "
+            "(e.g. too many small kernels, poor tiling)."
+        )
+        evidence_noun = "pipeline stages"
+    else:
+        recommendation = (
+            "These are NVTX regions, not necessarily pipeline stages — a phase "
+            "annotation (forward / backward / optimizer) is expected to vary this "
+            "way and needs no rebalancing. Check what the annotations mark before "
+            "acting: if they are pipeline stages, rebalance the partitioning; if "
+            "they are phases, investigate the heaviest one on its own merits."
+        )
+        evidence_noun = "NVTX regions"
+
     return [
         {
-            "pattern": "Pipeline Imbalance",
-            "severity": "warning",
+            "pattern": "Pipeline Imbalance" if looks_like_stages else "Uneven NVTX Regions",
+            "severity": "warning" if looks_like_stages else "info",
             "evidence": (
-                f"Compute time varies {ratio:.1f}× across layers. "
+                f"Compute time varies {ratio:.1f}× across {len(compute_layers)} "
+                f"{evidence_noun}. "
                 f"Heaviest: '{heaviest_label}' ({heaviest['compute_ms']:.1f}ms), "
                 f"lightest: '{lightest_label}' ({lightest['compute_ms']:.1f}ms)"
             ),
-            "recommendation": (
-                "Rebalance pipeline stage partitioning, "
-                "or investigate if the heavy layer has suboptimal kernel configuration "
-                "(e.g. too many small kernels, poor tiling)."
-            ),
+            "recommendation": recommendation,
         }
     ]
 
