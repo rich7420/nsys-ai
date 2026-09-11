@@ -1367,3 +1367,26 @@ def test_h2d_the_window_is_measured_in_elapsed_seconds():
 
     assert result["type"] == "undetermined"
     assert "spans 2 second-bucket(s)" in result["detail"]
+
+
+def test_h2d_weight_loading_in_a_long_capture_is_still_recognised():
+    """The commonest init_heavy profile, and the one the first fix broke.
+
+    A 60-second run whose weights load in the first two seconds produces buckets
+    0 and 1 and nothing after, because the rest of the capture holds no
+    transfers. Deriving the window from the buckets read that as a two-second
+    window and refused to classify it — advising the reader to widen --trim,
+    which cannot help, since there is nothing later to find.
+
+    The same two buckets mean different things depending on how long we watched,
+    so the window comes from the observation bounds and not from the transfers.
+    """
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    buckets = [{"second": 0, "total_mb": 900.0}, {"second": 1, "total_mb": 100.0}]
+
+    long_capture = _classify_h2d_pattern(buckets, {"_observed_seconds": 60})
+    short_capture = _classify_h2d_pattern(buckets, {"_observed_seconds": 2})
+
+    assert long_capture["type"] == "init_heavy"
+    assert short_capture["type"] == "undetermined"
