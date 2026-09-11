@@ -297,7 +297,9 @@ INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES
     -- H2D transfers at second 0 (init-heavy: 4MB)
     (100, 0, 7, 200, 1, 2097152, 7, 2, 100000, 200000),
     (100, 0, 7, 201, 1, 2097152, 7, 2, 300000, 400000),
-    -- H2D transfer at second 2 (small: 0.1MB)
+    -- H2D transfer 2.1 ms in (small: 0.1MB). Note the unit: these timestamps
+    -- are nanoseconds, so every H2D row here falls in bucket 0 and the whole
+    -- seeded span is ~2 ms. The comment used to say "second 2".
     (100, 0, 7, 202, 1, 104858, 7, 2, 2100000, 2200000),
     -- H2D transfer at second 5 (small: 0.1MB)
     (100, 0, 7, 203, 1, 104858, 7, 2, 5100000, 5200000);
