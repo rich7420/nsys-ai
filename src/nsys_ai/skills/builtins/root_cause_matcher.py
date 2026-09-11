@@ -194,8 +194,21 @@ def _execute(conn: sqlite3.Connection, **kwargs):
         gap_threshold = int(kwargs.get("min_gap_ns", 1_000_000))
         large_gaps = [g for g in gap_rows if g.get("gap_ns", 0) > gap_threshold]
         if len(large_gaps) >= 3:
+            # device_idle_ms first, because total_idle_ms is the per-stream sum.
+            # gpu_idle_gaps says so in its own formatter -- "on a multi-stream
+            # profile that overstates the wall-clock lost" -- and prints both for
+            # that reason. Taking the overstating one inflates the denominator of
+            # the synchronisation ratio below, so the rule under-fires on exactly
+            # the profiles that have the most streams to be wrong about.
+            #
+            # The fallback is not decoration: device_idle_ms is None when the
+            # device-level sweep could not run, and absent altogether from the
+            # no-gaps summary.
             total_idle_ms = (
-                gap_summary.get("total_idle_ms", 0)
+                _first_measured(
+                    gap_summary.get("device_idle_ms"),
+                    gap_summary.get("total_idle_ms"),
+                )
                 if gap_summary
                 else sum(g.get("gap_ns", 0) / 1e6 for g in large_gaps)
             )
@@ -710,6 +723,25 @@ def _check_layer_nccl_hotspot(layer_data: list[dict], threshold_pct: float = 40.
                 }
             )
     return findings
+
+
+def _first_measured(*values) -> float:
+    """The first value that is a measurement at all, else 0.0.
+
+    ``None`` means "could not be established" and falls through. Zero does not:
+    a device_idle_ms of 0 says the device was never idle, which is an answer, and
+    falling past it to a per-stream sum would contradict the very measurement
+    being preferred. The caller's threshold already guards against dividing by
+    it.
+    """
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _check_pipeline_imbalance(layer_data: list[dict], threshold_ratio: float = 3.0) -> list[dict]:
