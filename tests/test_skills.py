@@ -858,21 +858,25 @@ def test_root_cause_all_patterns_execute(minimal_nsys_conn):
 # ---- V3 Review Feature Tests ------------------------------------------------
 
 
-def test_h2d_distribution_init_heavy_pattern(minimal_nsys_conn):
-    """Seed data has H2D concentrated in second 0 — should classify as init_heavy."""
+def test_h2d_distribution_declines_to_classify_a_millisecond_fixture(minimal_nsys_conn):
+    """The fixture's H2D spans ~2 ms, which has no distribution to read.
+
+    This asserted ``init_heavy`` — "likely model weight loading, normal
+    behavior" — over three transfers 2 milliseconds apart. They all land in
+    bucket 0, so "the first two seconds" was the entire capture and the verdict
+    was structural rather than observed. Two milliseconds is not weight loading,
+    and a test resting on that verdict could not notice the rule never looked at
+    the data.
+    """
     from nsys_ai.skills.registry import get_skill
 
-    skill = get_skill("h2d_distribution")
-    rows = skill.execute(minimal_nsys_conn)
-    # Should have data rows + pattern metadata
+    rows = get_skill("h2d_distribution").execute(minimal_nsys_conn)
+
     assert len(rows) > 0
     pattern = next((r for r in rows if r.get("_pattern")), None)
     assert pattern is not None
-    assert pattern["type"] == "init_heavy"
-    assert (
-        "first 2 seconds" in pattern["detail"].lower()
-        or "concentrated" in pattern["detail"].lower()
-    )
+    assert pattern["type"] == "undetermined"
+    assert "second-bucket" in pattern["detail"]
 
 
 def test_h2d_distribution_format_shows_pattern(minimal_nsys_conn):
@@ -883,7 +887,10 @@ def test_h2d_distribution_format_shows_pattern(minimal_nsys_conn):
     rows = skill.execute(minimal_nsys_conn)
     text = skill.format_rows(rows)
     assert "Pattern:" in text
-    assert "init_heavy" in text
+    # The classification itself, not a particular verdict: this fixture is too
+    # short to have one, and pinning the verdict here is what hid the defect.
+    pattern = next(r for r in rows if r.get("_pattern"))
+    assert pattern["type"] in text
 
 
 def test_gpu_idle_gaps_aggregation(minimal_nsys_conn):
@@ -1283,3 +1290,103 @@ def test_the_copy_line_does_not_claim_to_be_a_share_of_idle():
     ])
 
     assert "not a share of the idle" in text
+
+
+# ── H2D distribution: a window needs a shape before one can be read off it ──
+
+
+def test_h2d_short_window_does_not_claim_weight_loading():
+    """Two buckets make 'the first two seconds' the whole window.
+
+    The ratio was then 1.0 by construction and init_heavy won whatever the data
+    said, so steady per-batch loading in a sub-2s trim was reported as normal
+    weight loading — the one verdict that tells a reader to stop looking.
+    """
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    steady = [{"second": 0, "total_mb": 100.0}, {"second": 1, "total_mb": 100.0}]
+
+    result = _classify_h2d_pattern(steady)
+
+    assert result["type"] == "undetermined"
+    assert "at least" in result["detail"]
+
+
+def test_h2d_the_same_pattern_gets_the_same_verdict_at_any_window_length():
+    """The classification must describe the data, not the trim."""
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    steady_6 = [{"second": s, "total_mb": 100.0} for s in range(6)]
+    steady_30 = [{"second": s, "total_mb": 100.0} for s in range(30)]
+
+    assert _classify_h2d_pattern(steady_6)["type"] == "spread_out"
+    assert _classify_h2d_pattern(steady_30)["type"] == "spread_out"
+
+
+def test_h2d_front_loading_is_still_recognised():
+    """The heuristic's real job, at two very different window lengths."""
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    short = [{"second": 0, "total_mb": 900.0}] + [
+        {"second": s, "total_mb": 5.0} for s in range(1, 8)
+    ]
+    long = [{"second": s, "total_mb": 100.0} for s in range(10)] + [
+        {"second": s, "total_mb": 1.0} for s in range(10, 40)
+    ]
+
+    assert _classify_h2d_pattern(short)["type"] == "init_heavy"
+    assert _classify_h2d_pattern(long)["type"] == "init_heavy"
+
+
+def test_h2d_sparse_buckets_do_not_swallow_a_late_spike():
+    """The query returns only seconds that carried a transfer.
+
+    len(rows) is therefore how many buckets have data, not how long the window
+    is. Slicing by position took "the first quarter of six rows" on buckets
+    [0, 50, 51, 52, 53, 54] and called a 900 MB spike at second 50 front-loading
+    — announced as "the first 51 seconds of a 6-second window" — which also
+    swallowed the spike finding root_cause_matcher consumes.
+    """
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    sparse = [
+        {"second": s, "total_mb": mb}
+        for s, mb in [(0, 1.0), (50, 900.0), (51, 1.0), (52, 1.0), (53, 1.0), (54, 1.0)]
+    ]
+
+    assert _classify_h2d_pattern(sparse)["type"] == "spike"
+
+
+def test_h2d_the_window_is_measured_in_elapsed_seconds():
+    """Two elapsed seconds have no shape, however many buckets carry data."""
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    result = _classify_h2d_pattern(
+        [{"second": 0, "total_mb": 100.0}, {"second": 1, "total_mb": 100.0}]
+    )
+
+    assert result["type"] == "undetermined"
+    assert "spans 2 second-bucket(s)" in result["detail"]
+
+
+def test_h2d_weight_loading_in_a_long_capture_is_still_recognised():
+    """The commonest init_heavy profile, and the one the first fix broke.
+
+    A 60-second run whose weights load in the first two seconds produces buckets
+    0 and 1 and nothing after, because the rest of the capture holds no
+    transfers. Deriving the window from the buckets read that as a two-second
+    window and refused to classify it — advising the reader to widen --trim,
+    which cannot help, since there is nothing later to find.
+
+    The same two buckets mean different things depending on how long we watched,
+    so the window comes from the observation bounds and not from the transfers.
+    """
+    from nsys_ai.skills.builtins.memory_transfers import _classify_h2d_pattern
+
+    buckets = [{"second": 0, "total_mb": 900.0}, {"second": 1, "total_mb": 100.0}]
+
+    long_capture = _classify_h2d_pattern(buckets, {"_observed_seconds": 60})
+    short_capture = _classify_h2d_pattern(buckets, {"_observed_seconds": 2})
+
+    assert long_capture["type"] == "init_heavy"
+    assert short_capture["type"] == "undetermined"

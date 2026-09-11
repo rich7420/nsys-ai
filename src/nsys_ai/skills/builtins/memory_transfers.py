@@ -44,6 +44,63 @@ ORDER BY total_ms DESC, copyKind ASC""",
 )
 
 
+#: A window shorter than this has no distribution to classify: across two
+#: seconds any "leading portion" is most of the window. Measured in elapsed
+#: seconds, not in buckets that happen to carry a transfer.
+_MIN_SECONDS_FOR_SHAPE = 3
+
+#: The leading share of the window that "front-loaded" means. A fraction rather
+#: than a fixed duration, so the same transfer pattern gets the same verdict in a
+#: 4-second window and a 40-second one.
+_INIT_LEAD_FRACTION = 0.25
+
+
+def _observed_seconds(conn, rows: list, kwargs: dict) -> float | None:
+    """Seconds from the first H2D transfer to the end of what was observed.
+
+    The trim window when one was given, otherwise the capture's own span. None
+    when neither can be established, and the caller falls back to the buckets --
+    which is the wrong answer, but a bounded one.
+    """
+    starts = [r.get("window_start") for r in rows if r.get("window_start") is not None]
+    if not starts:
+        return None
+    first_transfer = min(int(s) for s in starts)
+
+    # The last transfer is a floor on how long we watched: we saw it, so
+    # observation reached at least that far. Taking the kernel table's MAX(end)
+    # alone said otherwise wherever copies outlive the last kernel -- on a
+    # fixture with one kernel ending at 1.0s and transfers running to 4.2s it
+    # reported a one-second window and refused to classify a plainly steady
+    # spread.
+    ends = [r.get("window_end") for r in rows if r.get("window_end") is not None]
+    end_ns = max((int(e) for e in ends), default=None)
+
+    trim_end = kwargs.get("trim_end_ns")
+    if trim_end is not None:
+        end_ns = max(int(trim_end), end_ns) if end_ns is not None else int(trim_end)
+    else:
+        try:
+            from nsys_ai.connection import wrap_connection
+
+            adapter = wrap_connection(conn)
+            kernel_tbl = adapter.resolve_activity_tables().get("kernel")
+            if kernel_tbl:
+                row = adapter.execute(
+                    f'SELECT MAX(k."end") FROM {kernel_tbl} k'  # nosec B608
+                ).fetchone()
+                kernel_end = row[0] if row else None
+                if kernel_end is not None:
+                    end_ns = max(int(kernel_end), end_ns) if end_ns is not None else int(kernel_end)
+        except Exception:  # noqa: BLE001 - an optional bound, never a failure
+            pass
+    if end_ns is None:
+        return None
+
+    span_ns = int(end_ns) - first_transfer
+    return max(1.0, span_ns / 1e9) if span_ns > 0 else None
+
+
 def _classify_h2d_pattern(rows: list, kwargs: dict | None = None) -> dict:
     """Classify H2D transfer distribution into init_heavy / spread_out / spike."""
     if not rows:
@@ -53,16 +110,59 @@ def _classify_h2d_pattern(rows: list, kwargs: dict | None = None) -> dict:
     if total_mb <= 0:
         return {"_pattern": True, "type": "none", "detail": "No bytes transferred"}
 
-    # Init-heavy: first 2 seconds account for >80% of total bytes
-    first_2s_mb = sum(r["total_mb"] for r in rows if r["second"] <= 1)
-    if first_2s_mb / total_mb > 0.8:
+    # A window has to be long enough to have a shape before one can be read off
+    # it. With two buckets, "the first two seconds" is the whole window: the
+    # ratio below is 1.0 by construction and init_heavy wins whatever the data
+    # says, so steady per-batch loading in a sub-2s trim was reported as normal
+    # weight loading -- the one verdict that tells a reader to stop looking.
+    # Elapsed seconds, not row count. The query returns only the seconds that
+    # carried a transfer, so len(rows) is how many buckets have data and says
+    # nothing about how long the window is. Slicing by position then took "the
+    # first quarter of six rows" on buckets [0, 50, 51, 52, 53, 54] and called a
+    # 900 MB spike at second 50 front-loading -- reported, absurdly, as "the
+    # first 51 seconds of a 6-second window" -- which also swallowed the spike
+    # finding that root_cause_matcher consumes.
+    first_second = min(r["second"] for r in rows)
+    last_second = max(r["second"] for r in rows)
+    # How long we watched, not how long transfers ran. Deriving the window from
+    # the buckets makes the commonest init_heavy profile unclassifiable: a
+    # 60-second capture whose weights load in the first two seconds returns
+    # buckets 0 and 1 and nothing else, which reads as a two-second window. And
+    # the advice to widen --trim cannot help, because the rest of the capture
+    # holds no transfers to find.
+    observed_seconds = (kwargs or {}).get("_observed_seconds")
+    window_seconds = (
+        int(observed_seconds)
+        if observed_seconds
+        else last_second - first_second + 1
+    )
+
+    if window_seconds < _MIN_SECONDS_FOR_SHAPE:
+        return {
+            "_pattern": True,
+            "type": "undetermined",
+            "detail": (
+                f"Window spans {window_seconds} second-bucket(s); at least "
+                f"{_MIN_SECONDS_FOR_SHAPE} are needed to tell a front-loaded "
+                f"distribution from a steady one. Widen --trim to classify."
+            ),
+        }
+
+    # Init-heavy: the leading portion of the window accounts for >80% of bytes.
+    # Measured as a fraction of elapsed time rather than a fixed two seconds, so
+    # the verdict describes the distribution instead of the window length.
+    lead_seconds = max(1, round(window_seconds * _INIT_LEAD_FRACTION))
+    lead_cutoff = first_second + lead_seconds
+    lead_mb = sum(r["total_mb"] for r in rows if r["second"] < lead_cutoff)
+    if lead_mb / total_mb > 0.8:
         return {
             "_pattern": True,
             "type": "init_heavy",
             "detail": (
-                f"H2D concentrated in first 2 seconds "
-                f"({first_2s_mb:.1f}/{total_mb:.1f} MB = "
-                f"{100 * first_2s_mb / total_mb:.0f}%). "
+                f"H2D concentrated in the first {lead_seconds} second(s) of a "
+                f"{window_seconds}-second window "
+                f"({lead_mb:.1f}/{total_mb:.1f} MB = "
+                f"{100 * lead_mb / total_mb:.0f}%). "
                 f"Likely model weight loading — normal behavior."
             ),
         }
@@ -267,7 +367,9 @@ def _execute_h2d_dist(conn, **kwargs):
 
     # Append pattern classification as metadata
     if rows:
-        rows.append(_classify_h2d_pattern(rows, kwargs))
+        rows.append(
+            _classify_h2d_pattern(rows, {**kwargs, "_observed_seconds": _observed_seconds(conn, rows, kwargs)})
+        )
     return rows
 
 
