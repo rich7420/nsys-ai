@@ -41,7 +41,10 @@ You have two ways to interact with the profile:
 
 ### Step 3 — Know the 3 non-negotiable rules
 
-1. **MFU > 100% = bug.** Stop, recompute with narrower `operation`.
+1. **`MFU_EXCEEDS_PEAK` = bug.** The call refuses rather than returning a
+   number; recompute with the FLOPs of the work in that region. A high
+   `mfu_pct_wall` with `mfu_pct_kernel_union` under 100% is not this — that is an
+   asynchronous range, and the union figure is the one to report.
 2. **Never guess names.** Always query `NVTX_EVENTS` / `StringIds` first.
 3. **`theoretical_flops` must come from `compute_theoretical_flops`.** Never estimate.
 
@@ -102,7 +105,8 @@ When a user asks "what's my MFU?":
 | Use `SELECT *` | Name specific columns |
 | Guess NVTX name | Query `NVTX_EVENTS` first |
 | Divide by 1000 for ms | Divide ns by 1e6 for ms, 1e9 for s |
-| Report MFU > 100% | Recompute with narrower `operation` |
+| Report a refused `MFU_EXCEEDS_PEAK` as a result | Recompute with the region's own FLOPs |
+| Change the FLOPs because `mfu_pct_wall` is high | Check `mfu_pct_kernel_union` first; an async range makes wall meaningless |
 | Skip iteration 0 check in diff | Always skip index 0 (JIT warmup) |
 
 ---

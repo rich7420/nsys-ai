@@ -24,7 +24,8 @@ and diagnose performance issues without requiring a display or manual inspection
 - **The profile is a hard dependency** — If no profile is loaded, the tools will error.
   Fail clearly: tell the user what profile is needed and why.
 - **Fail loudly** — Unambiguous error messages let the agent self-correct.
-  Never silently return a wrong answer (e.g. MFU > 100% must be flagged as an error).
+  Never silently return a wrong answer (e.g. a union-basis MFU over 100% must be
+  flagged as an error).
 - **Provide introspection first** — Triage before computing. Run `skills/triage.md`
   to understand what's in the profile before running MFU or diff analysis.
 - **JSON is ground truth** — Tool outputs are JSON. Parse them; do not summarize
@@ -58,7 +59,10 @@ and diagnose performance issues without requiring a display or manual inspection
 
 ## Non-Negotiable Rules
 
-1. **MFU > 100% is always wrong.** The FLOPs scope is too wide. Stop, recompute with
+1. **A refused `MFU_EXCEEDS_PEAK` is always wrong.** The FLOPs scope is too wide,
+   and the call declines rather than returning a number. Judge on
+   `mfu_pct_kernel_union`; a high `mfu_pct_wall` alone means the range is
+   asynchronous, not that the input is bad. Stop, recompute with
    narrower `operation`. Do not report a value > 100%.
 2. **Never use `SELECT *`.** Always name the specific columns you need.
 3. **In diff mode: `search_nvtx_regions` before `get_region_diff`.** Never pass a
@@ -78,7 +82,8 @@ and diagnose performance issues without requiring a display or manual inspection
 
 | Error signal | Required action |
 |-------------|-----------------|
-| `MFU > 100%` | Recompute with narrower operation; explain the error |
+| `MFU_EXCEEDS_PEAK` | Recompute with narrower operation; explain the error |
+| `mfu_pct_wall > 100%`, union under it | Async range — report the union figure, keep the FLOPs |
 | `kernel_count = 0` | Report KERNEL_NOT_FOUND; suggest trying `source="kernel"` |
 | `is_aligned=false` in diff | Warn user; switch to `get_global_diff` |
 | `Hardware_Warning=true` | Note thermal throttle; advise re-run before concluding |

@@ -31,10 +31,17 @@ CRITICAL: theoretical_flops must match ONLY the computation the target kernel/re
   Pass num_gpus=world_size to compute_region_mfu. Peak is scaled automatically.
 
 ## 5. SANITY CHECK (MANDATORY)
-  After computing MFU, check the result:
-  - MFU > 100%  → theoretical_flops is TOO HIGH. You likely used full-model FLOPs
-                   for a single kernel. Recalculate with only that kernel's FLOPs.
-  - MFU < 0.1%  → theoretical_flops may be TOO LOW, or the kernel barely ran.
-  - MFU 10-80%  → typical reasonable range for compute-bound kernels.
-  If MFU > 100%, do NOT report it as-is. Recompute with correct FLOPs and explain.
+  Judge on mfu_pct_kernel_union: it is measured against the time the GPU was
+  actually busy, so it is the figure that cannot exceed 100%.
+  - error MFU_EXCEEDS_PEAK → the call refused rather than returning a number.
+                   theoretical_flops is almost always TOO HIGH: full-model FLOPs
+                   against one kernel, or a whole job's against one rank's
+                   region. Recompute with the FLOPs of the work in that region.
+                   Do not report the implied_ figures as a result.
+  - mfu_pct_wall > 100% while union is under it → NOT an error, and NOT a signal
+                   to change the FLOPs. An asynchronous NVTX range can close
+                   while its kernels run on, so wall is not the time the work
+                   took. Report the union figure and note the range is async.
+  - union < 0.1%  → theoretical_flops may be TOO LOW, or the kernel barely ran.
+  - union 10-80%  → typical reasonable range for compute-bound kernels.
 =============================
