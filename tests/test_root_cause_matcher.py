@@ -20,11 +20,9 @@ class TestIdleFieldSelection:
 
     @staticmethod
     def _pick(summary):
-        from nsys_ai.skills.builtins.root_cause_matcher import _first_measured
+        from nsys_ai.skills.builtins.root_cause_matcher import _idle_with_matching_pct
 
-        return _first_measured(
-            summary.get("device_idle_ms"), summary.get("total_idle_ms")
-        )
+        return _idle_with_matching_pct(summary, [])[0]
 
     def test_the_device_figure_wins_where_they_disagree(self):
         """A four-stream profile: the sum is ~4x the wall-clock loss."""
@@ -50,3 +48,52 @@ class TestIdleFieldSelection:
     def test_a_single_stream_profile_is_unchanged(self):
         """Where they agree, nothing moves -- which is why this went unnoticed."""
         assert self._pick({"device_idle_ms": 935.4, "total_idle_ms": 935.4}) == 935.4
+
+
+class TestIdlePercentageMatchesItsDuration:
+    """The duration and the percentage must describe the same measurement.
+
+    ``pct_of_profile`` is ``total_gap_ns / (span x n_streams)`` — normalised per
+    stream, so it belongs with the stream sum. Switching the duration to the
+    device figure and leaving the percentage put two unrelated quantities in one
+    sentence: "0.0ms of idle time (44.1% of profile)" on a profile where one
+    stream idled while another kept the device busy.
+    """
+
+    @staticmethod
+    def _pair(summary):
+        from nsys_ai.skills.builtins.root_cause_matcher import _idle_with_matching_pct
+
+        return _idle_with_matching_pct(summary, [])
+
+    def test_the_device_percentage_is_recomputed_from_the_span(self):
+        ms, pct = self._pair({
+            "device_idle_ms": 250.0, "total_idle_ms": 900.0, "pct_of_profile": 44.1,
+            "profile_start_ns": 0, "profile_end_ns": 1_000_000_000,
+        })
+
+        assert (ms, pct) == (250.0, 25.0)
+
+    def test_a_device_that_never_idled_reports_zero_percent(self):
+        """Not 0.0ms at 44.1%, which is the shape of the bug."""
+        ms, pct = self._pair({
+            "device_idle_ms": 0.0, "total_idle_ms": 900.0, "pct_of_profile": 44.1,
+            "profile_start_ns": 0, "profile_end_ns": 1_000_000_000,
+        })
+
+        assert (ms, pct) == (0.0, 0.0)
+
+    def test_the_stream_figures_are_used_together_as_a_pair(self):
+        """When the device sweep did not run, both come from the stream side."""
+        ms, pct = self._pair({
+            "device_idle_ms": None, "total_idle_ms": 900.0, "pct_of_profile": 44.1,
+        })
+
+        assert (ms, pct) == (900.0, 44.1)
+
+    def test_a_missing_span_does_not_invent_a_percentage(self):
+        """No span, no share — the duration still stands on its own."""
+        ms, pct = self._pair({"device_idle_ms": 250.0, "total_idle_ms": 900.0})
+
+        assert ms == 250.0
+        assert pct == 0.0
