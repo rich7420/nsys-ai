@@ -58,9 +58,11 @@ _INIT_LEAD_FRACTION = 0.25
 def _observed_seconds(conn, rows: list, kwargs: dict) -> float | None:
     """Seconds from the first H2D transfer to the end of what was observed.
 
-    The trim window when one was given, otherwise the capture's own span. None
-    when neither can be established, and the caller falls back to the buckets --
-    which is the wrong answer, but a bounded one.
+    The capture's own span for the selected device, narrowed to the trim window
+    when one was given -- narrowed, never widened: a requested window is not
+    evidence that anything was watched for that long. None when no bound can be
+    established, and the caller falls back to the buckets -- which is the wrong
+    answer, but a bounded one.
     """
     starts = [r.get("window_start") for r in rows if r.get("window_start") is not None]
     if not starts:
@@ -76,24 +78,35 @@ def _observed_seconds(conn, rows: list, kwargs: dict) -> float | None:
     ends = [r.get("window_end") for r in rows if r.get("window_end") is not None]
     end_ns = max((int(e) for e in ends), default=None)
 
+    # The kernel bound has to be scoped the way the buckets are. This query had
+    # no device predicate while the transfers it is measuring are filtered to
+    # one GPU, so a kernel on another card ending late stretched this card's
+    # window: steady transfers across GPU 0's six seconds classified as
+    # init_heavy because GPU 1 ran until second sixty.
+    try:
+        from nsys_ai.connection import wrap_connection
+
+        adapter = wrap_connection(conn)
+        kernel_tbl = adapter.resolve_activity_tables().get("kernel")
+        if kernel_tbl:
+            device = int(kwargs.get("device", 0) or 0)
+            row = adapter.execute(
+                f'SELECT MAX(k."end") FROM {kernel_tbl} k WHERE k.deviceId = {device}'  # nosec B608
+            ).fetchone()
+            kernel_end = row[0] if row else None
+            if kernel_end is not None:
+                end_ns = max(int(kernel_end), end_ns) if end_ns is not None else int(kernel_end)
+    except Exception:  # noqa: BLE001 - an optional bound, never a failure
+        pass
+
+    # A requested window is not observed time. --trim accepts an endpoint past
+    # the end of the capture and nothing clamps it, so asking for sixty seconds
+    # of a six-second profile put the init lead (a quarter of the window) at
+    # fifteen seconds -- swallowing every transfer and reporting init_heavy for
+    # data that is plainly spread out. Observation stops where the capture does.
     trim_end = kwargs.get("trim_end_ns")
     if trim_end is not None:
-        end_ns = max(int(trim_end), end_ns) if end_ns is not None else int(trim_end)
-    else:
-        try:
-            from nsys_ai.connection import wrap_connection
-
-            adapter = wrap_connection(conn)
-            kernel_tbl = adapter.resolve_activity_tables().get("kernel")
-            if kernel_tbl:
-                row = adapter.execute(
-                    f'SELECT MAX(k."end") FROM {kernel_tbl} k'  # nosec B608
-                ).fetchone()
-                kernel_end = row[0] if row else None
-                if kernel_end is not None:
-                    end_ns = max(int(kernel_end), end_ns) if end_ns is not None else int(kernel_end)
-        except Exception:  # noqa: BLE001 - an optional bound, never a failure
-            pass
+        end_ns = min(int(trim_end), end_ns) if end_ns is not None else int(trim_end)
     if end_ns is None:
         return None
 

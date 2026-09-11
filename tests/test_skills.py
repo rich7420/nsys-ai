@@ -1390,3 +1390,77 @@ def test_h2d_weight_loading_in_a_long_capture_is_still_recognised():
 
     assert long_capture["type"] == "init_heavy"
     assert short_capture["type"] == "undetermined"
+
+
+# ── The H2D observation window is bounded by the capture, and by the device ──
+
+
+def _kernel_conn(kernels):
+    """A connection whose kernel table holds (deviceId, start, end) rows."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        'CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL('
+        'globalPid INTEGER, deviceId INTEGER, streamId INTEGER, correlationId INTEGER,'
+        'start INTEGER, "end" INTEGER, shortName INTEGER, demangledName INTEGER)'
+    )
+    conn.executemany(
+        "INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL "
+        "(globalPid, deviceId, streamId, correlationId, start, end, shortName, demangledName) "
+        "VALUES (0, ?, 7, 1, ?, ?, 1, 1)",
+        kernels,
+    )
+    conn.commit()
+    return conn
+
+
+def _steady_buckets(seconds):
+    """One 100MB transfer per second, for `seconds` seconds."""
+    return [
+        {"second": s, "total_mb": 100.0,
+         "window_start": s * 1_000_000_000, "window_end": s * 1_000_000_000 + 1_000_000}
+        for s in range(seconds)
+    ]
+
+
+def test_a_trim_window_past_the_capture_does_not_become_observed_time():
+    """--trim accepts an endpoint beyond the capture and nothing clamped it.
+
+    With the init lead at a quarter of the window, asking for 60s of a 6s
+    profile puts the lead at 15s -- swallowing every transfer and reporting
+    init_heavy for data that is plainly spread out.
+    """
+    from nsys_ai.skills.builtins.memory_transfers import _observed_seconds
+
+    conn = _kernel_conn([(0, 0, 6_000_000_000)])
+    rows = _steady_buckets(6)
+
+    untrimmed = _observed_seconds(conn, rows, {"device": 0})
+    trimmed = _observed_seconds(conn, rows, {"device": 0, "trim_end_ns": 60_000_000_000})
+
+    assert untrimmed == trimmed, f"{untrimmed} != {trimmed}"
+    assert trimmed < 10
+
+
+def test_a_kernel_on_another_device_does_not_stretch_this_one_s_window():
+    """The buckets are filtered to one GPU; the bound has to be too."""
+    from nsys_ai.skills.builtins.memory_transfers import _observed_seconds
+
+    rows = _steady_buckets(6)
+    alone = _observed_seconds(_kernel_conn([(0, 0, 6_000_000_000)]), rows, {"device": 0})
+    with_peer = _observed_seconds(
+        _kernel_conn([(0, 0, 6_000_000_000), (1, 0, 60_000_000_000)]), rows, {"device": 0}
+    )
+
+    assert alone == with_peer, f"GPU 1 changed GPU 0's window: {alone} -> {with_peer}"
+
+
+def test_a_trim_window_inside_the_capture_is_still_honoured():
+    """The complement: narrowing is the point, so a real trim must still apply."""
+    from nsys_ai.skills.builtins.memory_transfers import _observed_seconds
+
+    conn = _kernel_conn([(0, 0, 60_000_000_000)])
+    rows = _steady_buckets(6)
+
+    assert _observed_seconds(conn, rows, {"device": 0, "trim_end_ns": 6_000_000_000}) < 10
