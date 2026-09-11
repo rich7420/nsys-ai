@@ -35,7 +35,8 @@ Read this when the user asks about GPU efficiency, MFU, or TFLOPS utilization.
 | Generic GEMM | `"linear"` | 2·M·N·K |
 
 **CRITICAL**: If the target is a SINGLE kernel type (e.g. `flash_fwd`), use the narrow
-per-kernel operation. Using `full_model` FLOPs for one kernel ALWAYS gives MFU > 100%.
+per-kernel operation. Using `full_model` FLOPs for one kernel ALWAYS trips
+`MFU_EXCEEDS_PEAK`.
 
 ---
 
@@ -71,9 +72,19 @@ Step 5  Use `compute_region_mfu`:
             source="nvtx" (or "kernel"), peak_tflops=<from step 1>, num_gpus=<world_size>
         → {mfu_pct_wall, mfu_pct_kernel_union, wall_time_s, kernel_count, ...}
 
-Step 6  Sanity check — MANDATORY before reporting:
-        • mfu_pct_wall > 100% → operation scope too wide; use narrower operation from table
-        • mfu_pct_wall < 1%   → name match failed (check kernel_count) or FLOPs too low
+Step 6  Sanity check — MANDATORY before reporting. Judge on
+        mfu_pct_kernel_union, which is measured against the time the GPU was
+        actually busy:
+        • error MFU_EXCEEDS_PEAK → the call refused: nothing can beat its own
+                                   peak, so an input is wrong. Usually a whole
+                                   job's FLOPs against a region covering one
+                                   rank, or num_gpus scaled past what the region
+                                   covers. Fix the input; do not re-report.
+        • mfu_pct_wall > 100%, union under it → NOT an error. An async range can
+                                   close while its work runs on, so wall is not
+                                   the time the work took. Report the union
+                                   figure and say the range is asynchronous.
+        • union < 1%          → name match failed (check kernel_count) or FLOPs too low
         • 40–80%              → healthy compute-bound
         • < 30%               → possible memory bandwidth bottleneck
 
@@ -143,7 +154,8 @@ Also run global checklist in `PRINCIPLES.md`.
 
 | Signal | Action |
 |--------|--------|
-| `mfu_pct_wall > 100%` | Recompute with narrower `operation`; explain to user |
+| error `MFU_EXCEEDS_PEAK` | An input is wrong — recompute with the FLOPs of the work in that region |
+| `mfu_pct_wall > 100%`, union under it | Asynchronous range; report the union figure, do not change the FLOPs |
 | `kernel_count = 0` | Report KERNEL_NOT_FOUND; try `source="kernel"` or fix name substring |
 | GPU unknown | Ask user for `peak_tflops` (BF16/FP16, dense, no sparsity) |
 | Model name not in table | Ask user for `hidden_dim`, `num_layers`, `seq_len` |

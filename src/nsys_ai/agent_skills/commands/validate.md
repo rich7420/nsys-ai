@@ -78,7 +78,8 @@ Produce a scored report. **Do not skip any category.**
 - [ ] C5.2 All numeric values include units (ms, s, %, TFLOPS)
 - [ ] C5.3 MFU result states whether forward-only or forward+backward
 - [ ] C5.4 MFU result compared to reference range (< 20% / 30-45% / 45-60% / > 60%)
-- [ ] C5.5 No hedging on a wrong result (e.g. MFU > 100% must be corrected, not reported)
+- [ ] C5.5 No hedging on a wrong result (e.g. a union-basis MFU over 100% must be
+      corrected, not reported)
 
 ### Category 6: Tool Usage (5 checks)
 

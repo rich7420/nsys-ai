@@ -106,7 +106,9 @@ After delivering your text conclusion, produce visual evidence so humans can ver
 - **Always state**: GPU name, peak TFLOPS, profile span
 - **Always state**: primary bottleneck kernel and % of GPU time
 - **If MFU computed**: state whether it is forward-only or forward+backward
-- **If MFU > 100%**: stop and explain the error before reporting
+- **If the call returns `MFU_EXCEEDS_PEAK`**: stop and explain the error before
+  reporting. A high `mfu_pct_wall` with `mfu_pct_kernel_union` under 100% is an
+  asynchronous range, not an error — report the union figure.
 - **Never output a number without units** (ms, s, %, TFLOPS)
 
 ---
