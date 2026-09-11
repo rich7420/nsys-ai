@@ -1237,3 +1237,49 @@ def test_the_table_guard_covers_only_sql_templates():
         f"ACTIVITY_TABLE_PLACEHOLDERS in skills/base.py. Now guarded: "
         f"{sorted(in_templates)}"
     )
+
+
+def test_copy_wall_ms_counts_the_part_inside_the_window():
+    """A transfer crossing a trim edge still copied inside the window.
+
+    The kernel predicate this reused is containment — start >= trim_start AND
+    end <= trim_end — which drops such a transfer entirely, so a copy running
+    0-20 ms reported nothing for a 5-15 ms window it occupied end to end.
+    """
+    import sqlite3
+
+    from nsys_ai.connection import wrap_connection
+    from nsys_ai.skills.builtins.gpu_idle_gaps import _copy_wall_ms
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute('CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY (deviceId INT, start INT, "end" INT)')
+    conn.execute("INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (0, 0, 20000000)")
+    conn.commit()
+    adapter = wrap_connection(conn)
+
+    clipped = _copy_wall_ms(
+        adapter,
+        "CUPTI_ACTIVITY_KIND_MEMCPY",
+        "AND k.start >= ? AND k.[end] <= ?",
+        [0, 5_000_000, 15_000_000],
+    )
+    whole = _copy_wall_ms(adapter, "CUPTI_ACTIVITY_KIND_MEMCPY", "", [0])
+
+    assert clipped == 10.0
+    assert whole == 20.0
+
+
+def test_the_copy_line_does_not_claim_to_be_a_share_of_idle():
+    """Copies overlap kernels, so copy time can exceed the idle beside it."""
+    from nsys_ai.skills.builtins.gpu_idle_gaps import _format
+
+    text = _format([
+        # A data row too: with only the summary the formatter takes its
+        # "no significant gaps" path and never reaches the copy line.
+        {"streamId": 7, "gap_ns": 2_000_000, "before_kernel": "k", "attribution": {}},
+        {"_summary": True, "gap_count": 1, "total_idle_ms": 2.0,
+         "device_idle_ms": 2.0, "copy_ms": 20.0, "pct_of_profile": 5.0,
+         "gaps_1_5ms": 1, "gaps_5_50ms": 0, "gaps_gt50ms": 0},
+    ])
+
+    assert "not a share of the idle" in text

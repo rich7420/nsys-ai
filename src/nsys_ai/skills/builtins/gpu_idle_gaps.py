@@ -45,6 +45,19 @@ def _classify_gap_apis(api_names: list[str]) -> tuple[str, str]:
     return "unknown", "Unclassified CUDA API activity"
 
 
+def _in_chunks(cursor, size: int = 10_000):
+    """Yield rows a block at a time, on either backend.
+
+    ``fetchmany`` is the portable call: a sqlite3 cursor is iterable and a
+    DuckDBPyConnection is not, and ``adapter.execute`` can return either.
+    """
+    while True:
+        block = cursor.fetchmany(size)
+        if not block:
+            return
+        yield from block
+
+
 def _copy_wall_ms(adapter, memcpy_tbl, trim_clause, params) -> float | None:
     """Wall time on *device* during which at least one copy was in flight.
 
@@ -63,23 +76,45 @@ def _copy_wall_ms(adapter, memcpy_tbl, trim_clause, params) -> float | None:
     """
     if not memcpy_tbl:
         return None
+    # Overlap, not containment. The kernel predicate this reused is
+    # "start >= trim_start AND end <= trim_end", which drops a transfer that
+    # crosses either edge -- so a copy running 0-20ms reported nothing at all
+    # for a 5-15ms window it occupied end to end. Selected on overlap and
+    # clipped below, so a copy counts for the part inside the window.
+    window = None
+    if trim_clause:
+        window = (int(params[1]), int(params[2]))
+        where = 'WHERE m.deviceId = ? AND m.start < ? AND m."end" > ?'
+        args = [params[0], window[1], window[0]]
+    else:
+        where = "WHERE m.deviceId = ?"
+        args = [params[0]]
     try:
-        rows = adapter.execute(
+        cursor = adapter.execute(
             f'SELECT m.start, m."end" FROM {memcpy_tbl} m '  # nosec B608
-            f"WHERE m.deviceId = ? {trim_clause.replace('k.', 'm.')} "
-            f"ORDER BY m.start",
-            params,
-        ).fetchall()
+            f"{where} ORDER BY m.start",
+            args,
+        )
     except DB_ERRORS:
         return None
-    if not rows:
-        return 0.0
 
+    # fetchmany, not iteration and not fetchall. The merge only ever needs the
+    # interval it is extending, so holding every copy would be memory spent for
+    # nothing -- and this skill is one of the three measured against a heap
+    # ceiling in test_analysis_memory, on profiles where the copy count runs to
+    # millions. Iterating the handle directly does not work: adapter.execute
+    # returns a DuckDBPyConnection on the cached backend, which is not iterable,
+    # while a sqlite3 cursor is. fetchmany is the call both answer to.
     total_ns = 0
     span_start, span_end = None, None
-    for start, end in rows:
+    for start, end in _in_chunks(cursor):
         if start is None or end is None or end <= start:
             continue
+        if window is not None:
+            start = max(int(start), window[0])
+            end = min(int(end), window[1])
+            if end <= start:
+                continue
         if span_start is None:
             span_start, span_end = int(start), int(end)
             continue
@@ -90,7 +125,7 @@ def _copy_wall_ms(adapter, memcpy_tbl, trim_clause, params) -> float | None:
             span_end = max(span_end, int(end))
     if span_start is not None:
         total_ns += span_end - span_start
-    return round(total_ns / 1e6, 2)
+    return round(total_ns / 1e6, 2)  # 0.0 when the table held no rows
 
 
 def _execute(conn: sqlite3.Connection, **kwargs):
@@ -350,8 +385,8 @@ def _format(rows):
         copy_ms = summary.get("copy_ms")
         if copy_ms:
             lines.append(
-                f"  GPU copying:       {copy_ms:.1f}ms — idle above counts kernel "
-                f"absence, so copy time is inside it"
+                f"  GPU copying:       {copy_ms:.1f}ms — measured independently; "
+                f"copies may overlap kernels, so this is not a share of the idle above"
             )
         lines.append(
             f"  Distribution: "
