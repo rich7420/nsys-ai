@@ -162,3 +162,51 @@ class TestGapCountAndIdleTotalAgree:
         gaps = [{"gap_ns": 5_000_000, "attribution": {}} for _ in range(4)]
 
         assert self._evidence(summary, gaps).startswith("4 gaps")
+
+
+class TestTheIdleLabelNamesItsMeasurement:
+    """The evidence must not call the per-stream sum device-wide idle.
+
+    _idle_with_matching_pct returns the device figure when the sweep ran and the
+    per-stream sum when it did not. Labelling both "total GPU idle" let three
+    concurrently-idling streams report 810.0ms of it on a 310ms profile -- the
+    overstatement #600 removed from the number, back in the label. The
+    percentage does not expose it, because the per-stream figure travels with
+    the per-stream percentage.
+    """
+
+    @staticmethod
+    def _evidence(summary):
+        import sqlite3
+        from unittest.mock import patch
+
+        from nsys_ai.skills.builtins import root_cause_matcher as rcm
+
+        gaps = [{"gap_ns": 90_000_000, "attribution": {}} for _ in range(9)]
+
+        def fake(name, conn, **kw):
+            return [summary, *gaps] if name == "gpu_idle_gaps" else []
+
+        with patch.object(rcm, "_safe_execute", side_effect=fake):
+            findings = rcm._execute(sqlite3.connect(":memory:"), _skip_device_validation=True)
+        return next(
+            (f["evidence"] for f in findings if f["pattern"].startswith("GPU Bubbles")), ""
+        )
+
+    def test_the_stream_sum_is_not_called_device_idle(self):
+        """810ms of idle cannot be "GPU idle" on a 310ms profile."""
+        evidence = self._evidence({
+            "_summary": True, "total_idle_ms": 810.0, "pct_of_profile": 87.1,
+            "profile_start_ns": 0, "profile_end_ns": 310_000_000,
+        })
+
+        assert "810.0ms total GPU idle" not in evidence, evidence
+        assert "summed across streams" in evidence, evidence
+
+    def test_the_device_measurement_keeps_the_device_wording(self):
+        evidence = self._evidence({
+            "_summary": True, "device_idle_ms": 270.0, "total_idle_ms": 810.0,
+            "profile_start_ns": 0, "profile_end_ns": 310_000_000,
+        })
+
+        assert "270.0ms total GPU idle" in evidence, evidence
