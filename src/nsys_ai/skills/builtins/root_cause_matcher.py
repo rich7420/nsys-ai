@@ -878,7 +878,18 @@ def _regions_look_like_repeated_peers(layers: list[dict]) -> bool:
     # digits would fold "aten::linear, op_id = 1..132" into one name, but it
     # would equally fold a real "stage_0..stage_7" pipeline into one, rejecting
     # the very case this is meant to keep.
-    if len(layers) > _MAX_PLAUSIBLE_STAGES:
+    # Distinct identities, not rows. nvtx_layer_breakdown returns one row per
+    # full path, so a pipeline annotated under an iteration-specific parent
+    # yields one row per stage *per iteration*: the same four stages recorded
+    # over ten iterations arrived as forty rows and were dismissed as too many
+    # to be a pipeline, while the same capture trimmed to one iteration was not.
+    # How long the capture ran is not evidence about what the regions are.
+    #
+    # The leaf labels are already to hand for the phase check above, and they
+    # are the identities: four stages stay four however often they repeat, and
+    # the 132 distinct "aten::linear, op_id = N" regions that motivated this
+    # limit stay 132.
+    if len(set(labels)) > _MAX_PLAUSIBLE_STAGES:
         return False
 
     # A stage spans many kernels; a region wrapping a single kernel is one

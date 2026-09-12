@@ -239,3 +239,39 @@ def test_a_missing_kernel_count_is_not_read_as_evidence():
     ])
 
     assert findings[0]["pattern"] == "Pipeline Imbalance"
+
+
+def test_recording_more_iterations_does_not_dismiss_a_pipeline():
+    """How long the capture ran is not evidence about what the regions are.
+
+    nvtx_layer_breakdown returns one row per full path, so stages under an
+    iteration-specific parent arrive once per stage per iteration. Counting rows
+    meant four stages over ten iterations read as forty regions and were
+    dismissed as too many to be a pipeline -- while the same capture trimmed to
+    one iteration was not.
+    """
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    def capture(iterations):
+        return [
+            {"nvtx_path": f"iteration_{i} > stage_{s}", "kernel_count": 300, "compute_ms": ms}
+            for i in range(iterations)
+            for s, ms in enumerate([900.0, 120.0, 100.0, 90.0])
+        ]
+
+    verdicts = {n: _check_pipeline_imbalance(capture(n))[0]["pattern"] for n in (1, 10, 40)}
+
+    assert set(verdicts.values()) == {"Pipeline Imbalance"}, verdicts
+
+
+def test_many_distinct_regions_are_still_not_a_pipeline():
+    """The complement: distinct identities, not repetitions, are what the cap is for."""
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    regions = [
+        {"nvtx_path": f"aten::linear, op_id = {318000 + i}", "kernel_count": 40,
+         "compute_ms": 400.0 if i == 0 else 40.0}
+        for i in range(132)
+    ]
+
+    assert _check_pipeline_imbalance(regions)[0]["pattern"] == "Uneven NVTX Regions"
