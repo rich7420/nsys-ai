@@ -889,7 +889,15 @@ def _regions_look_like_repeated_peers(layers: list[dict]) -> bool:
     # are the identities: four stages stay four however often they repeat, and
     # the 132 distinct "aten::linear, op_id = N" regions that motivated this
     # limit stay 132.
-    if len(set(labels)) > _MAX_PLAUSIBLE_STAGES:
+    # Counting identities needs a floor as well as a ceiling. Collapsing rows to
+    # distinct labels also collapses two hundred unlabelled regions, or two
+    # hundred that share one name, down to a single identity -- which would slip
+    # under the ceiling and be claimed as a pipeline, where counting rows had at
+    # least rejected them. An empty label is not an identity, and one identity
+    # is not a partition: a spread across repetitions of a single region is
+    # variance between iterations, not stages to rebalance.
+    identities = {label for label in labels if label}
+    if not 2 <= len(identities) <= _MAX_PLAUSIBLE_STAGES:
         return False
 
     # A stage spans many kernels; a region wrapping a single kernel is one

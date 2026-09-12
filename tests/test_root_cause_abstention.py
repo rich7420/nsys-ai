@@ -275,3 +275,22 @@ def test_many_distinct_regions_are_still_not_a_pipeline():
     ]
 
     assert _check_pipeline_imbalance(regions)[0]["pattern"] == "Uneven NVTX Regions"
+
+
+def test_regions_without_distinct_identities_are_not_a_pipeline():
+    """Counting identities needs a floor, or the ceiling lets the worst case through.
+
+    Two hundred unlabelled regions, or two hundred sharing one name, collapse to
+    a single identity. Counting rows at least rejected those; counting identities
+    would have waved them past the ceiling and called them a pipeline.
+    """
+    from nsys_ai.skills.builtins.root_cause_matcher import _check_pipeline_imbalance
+
+    def spread(label):
+        return [
+            {"nvtx_path": label, "kernel_count": 40, "compute_ms": 900.0 if i == 0 else 20.0}
+            for i in range(200)
+        ]
+
+    assert _check_pipeline_imbalance(spread(""))[0]["pattern"] == "Uneven NVTX Regions"
+    assert _check_pipeline_imbalance(spread("train > stage"))[0]["pattern"] == "Uneven NVTX Regions"
