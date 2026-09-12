@@ -664,10 +664,20 @@ def _trip_once_child_exists(tmp_path, event, timeout=15):
     path = Path(tmp_path) / "artifacts" / "profile.child.pid"
 
     def _wait():
+        # Wait for a readable pid, not merely for the file. write_text creates
+        # the file before it writes, so exists() is true while it is still
+        # empty; tripping there let teardown kill the profiler in the gap
+        # before it recorded the pid, and _child_pid -- which does wait for
+        # content -- then spun out its whole timeout and failed a test whose
+        # cleanup had actually worked. A narrower version of the race this
+        # helper exists to remove.
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if path.exists():
-                break
+            try:
+                if path.read_text().strip():
+                    break
+            except (FileNotFoundError, NotADirectoryError):
+                pass
             time.sleep(0.01)
         event.set()
 
@@ -1008,3 +1018,24 @@ def test_teardown_still_stops_at_a_group_that_has_gone(monkeypatch):
     profile_runner.LocalProfileRunner._terminate_process_group(_GoneProcess())
 
     assert _GoneProcess.waited
+
+
+def test_the_cancellation_trigger_waits_for_a_readable_pid(tmp_path):
+    """write_text creates the file before writing, so exists() is not enough.
+
+    Tripping on the bare file let teardown kill the profiler in the gap before
+    it recorded the pid, and _child_pid then spun out its whole timeout on a
+    test whose process cleanup had actually worked.
+    """
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    pid_file = artifacts / "profile.child.pid"
+    pid_file.write_text("")          # created, still empty
+
+    event = threading.Event()
+    _trip_once_child_exists(tmp_path, event, timeout=2)
+
+    assert not event.wait(0.3), "tripped on an empty pid file"
+
+    pid_file.write_text("4321")
+    assert event.wait(2), "did not trip once the pid was readable"
