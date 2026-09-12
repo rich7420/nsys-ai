@@ -265,9 +265,22 @@ def _execute(conn: sqlite3.Connection, **kwargs):
                 counted = len(large_gaps)
             counted = max(counted, len(large_gaps))
 
+            # Say which measurement this is. _idle_with_matching_pct returns the
+            # device figure when the sweep ran and the per-stream sum when it
+            # did not, and calling both "total GPU idle" made the fallback claim
+            # the device: three streams idling concurrently summed to 810.0ms of
+            # "total GPU idle" on a profile 310ms long. The percentage does not
+            # give it away either, because the per-stream figure travels with
+            # the per-stream percentage. That overstatement is the one #600
+            # removed from the number; this keeps it out of the label.
+            device_measured = (
+                bool(gap_summary) and gap_summary.get("device_idle_ms") is not None
+            )
+            idle_label = "total GPU idle" if device_measured else "idle summed across streams"
+
             evidence = (
                 f"{counted} gaps > {gap_threshold / 1e6:.1f}ms detected; "
-                f"{total_idle_ms:.1f}ms total GPU idle"
+                f"{total_idle_ms:.1f}ms {idle_label}"
             )
             if pct > 0:
                 evidence += f" ({pct}% of profile)"
